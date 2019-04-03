@@ -20,19 +20,17 @@ RUN apt-get update \
   equivs \
   git \
   cmake \
-  ninja \
  && git clone --depth 1 --branch llvmorg-${LLVM_VERSION} https://github.com/llvm/llvm-project.git \
  && cd llvm-project/ \
  && mkdir build \
  && cd build\
  && cmake -DCMAKE_BUILD_TYPE=Release ../llvm/ \
- && cmake --build . \
- && cmake --build . --target install \
+ && make -j4 \
+ && make -j4 install \
  && cd ../../ \
  && rm -rf llvm-project \
  && apt-get remove -y \
-  cmake \
-  ninja
+  cmake
 
 WORKDIR /home/pony
 
