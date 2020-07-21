@@ -64,16 +64,14 @@ class CommandParser
 
     while tokens.size() > 0 do
       let token = try tokens.shift()? else "" end
-      if token == "--" then
+      if (token == "--") and (opt_stop == false) then
         opt_stop = true
 
       elseif not opt_stop and (token.compare_sub("--", 2, 0) == Equal) then
         match _parse_long_option(token.substring(2), tokens)
         | let o: Option =>
           if o.spec()._typ_p().is_seq() then
-            try
-              options.upsert(o.spec().name(), o, {(x, n) => x._append(n) })?
-            end
+            options.upsert(o.spec().name(), o, {(x, n) => x._append(n) })
           else
             options.update(o.spec().name(), o)
           end
@@ -86,9 +84,7 @@ class CommandParser
         | let os: Array[Option] =>
           for o in os.values() do
             if o.spec()._typ_p().is_seq() then
-              try
-                options.upsert(o.spec().name(), o, {(x, n) => x._append(n) })?
-              end
+              options.upsert(o.spec().name(), o, {(x, n) => x._append(n) })
             else
               options.update(o.spec().name(), o)
             end
@@ -112,9 +108,7 @@ class CommandParser
           match _parse_arg(token, arg_pos)
           | let a: Arg =>
             if a.spec()._typ_p().is_seq() then
-              try
-                args.upsert(a.spec().name(), a, {(x, n) => x._append(n) })?
-              end
+              args.upsert(a.spec().name(), a, {(x, n) => x._append(n) })
             else
               args.update(a.spec().name(), a)
               arg_pos = arg_pos + 1
@@ -126,13 +120,16 @@ class CommandParser
     end
 
     // If it's a help option, return a general or specific CommandHelp.
-    if options.contains(_help_name()) then
-      return
-        if _spec is _root_spec() then
-          Help.general(_root_spec())
-        else
-          Help.for_command(_root_spec(), [_spec.name()])
-        end
+    try
+      let help_option = options(_help_name())?
+      if help_option.bool() then
+        return
+          if _spec is _root_spec() then
+            Help.general(_root_spec())
+          else
+            Help.for_command(_root_spec(), [_spec.name()])
+          end
+      end
     end
 
     // If it's a help command, return a general or specific CommandHelp.

@@ -187,9 +187,17 @@ typedef struct pony_language_features_init_t
  * 28/0 bytes: padding to 64 bytes, ignored
  */
 #if INTPTR_MAX == INT64_MAX
+#ifdef USE_MEMTRACK
+#  define PONY_ACTOR_PAD_SIZE 280
+#else
 #  define PONY_ACTOR_PAD_SIZE 248
+#endif
 #elif INTPTR_MAX == INT32_MAX
+#ifdef USE_MEMTRACK
+#  define PONY_ACTOR_PAD_SIZE 176
+#else
 #  define PONY_ACTOR_PAD_SIZE 160
+#endif
 #endif
 
 typedef struct pony_actor_pad_t
@@ -272,17 +280,6 @@ PONY_API void pony_sendp(pony_ctx_t* ctx, pony_actor_t* to, uint32_t id,
  */
 PONY_API void pony_sendi(pony_ctx_t* ctx, pony_actor_t* to, uint32_t id,
   intptr_t i);
-
-/** Store a continuation.
- *
- * This puts a message at the front of the current actor's queue, instead of at
- * the back.
- *
- * Not used in Pony.
- */
-#ifdef USE_ACTOR_CONTINUATIONS
-PONY_API void pony_continuation(pony_ctx_t* ctx, pony_msg_t* m);
-#endif
 
 /** Allocate memory on the current actor's heap.
  *

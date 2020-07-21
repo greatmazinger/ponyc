@@ -83,6 +83,10 @@ typedef struct pool_block_t
   };
   size_t size;
   PONY_ATOMIC(bool) acquired;
+
+#if defined(_MSC_VER)
+  pool_block_t() { }
+#endif
 } pool_block_t;
 
 /// A thread local list of free blocks header.
@@ -175,7 +179,7 @@ static void pool_event_print(int thread, void* op, size_t event, size_t tsc,
       thread, event, tsc, (size_t)addr, size);
 }
 
-static void pool_track(int thread_filter, void* addr_filter, int op_filter,
+static void pool_track(int thread_filter, void* addr_filter, size_t op_filter,
   size_t event_filter)
 {
   for(int i = 0; i < POOL_TRACK_MAX_THREADS; i++)
@@ -224,7 +228,7 @@ static void pool_track(int thread_filter, void* addr_filter, int op_filter,
             op = t->data[j];
             state = 0;
 
-            if((op_filter != -1) && (op_filter != (int)op))
+            if((op_filter != (size_t)-1) && (op_filter != (size_t)op))
               print = false;
 
             if((event_filter != (size_t)-1) && (event_filter != event))
@@ -853,8 +857,8 @@ void* ponyint_pool_alloc(size_t index)
 
 #ifdef USE_VALGRIND
   VALGRIND_ENABLE_ERROR_REPORTING;
-  VALGRIND_HG_CLEAN_MEMORY(p, ponyint_pool_size(index));
-  VALGRIND_MALLOCLIKE_BLOCK(p, ponyint_pool_size(index), 0, 0);
+  VALGRIND_HG_CLEAN_MEMORY(p, POOL_SIZE(index));
+  VALGRIND_MALLOCLIKE_BLOCK(p, POOL_SIZE(index), 0, 0);
 #endif
 
   return p;
@@ -863,7 +867,7 @@ void* ponyint_pool_alloc(size_t index)
 void ponyint_pool_free(size_t index, void* p)
 {
 #ifdef USE_VALGRIND
-  VALGRIND_HG_CLEAN_MEMORY(p, ponyint_pool_size(index));
+  VALGRIND_HG_CLEAN_MEMORY(p, POOL_SIZE(index));
   VALGRIND_DISABLE_ERROR_REPORTING;
 #endif
 
@@ -1037,14 +1041,19 @@ size_t ponyint_pool_index(size_t size)
   // The condition is in that order for better branch prediction: non-zero pool
   // indices are more likely than zero pool indices.
   if(size > POOL_MIN)
-    return (size_t)BITS - __pony_clzl(size) - (!(size & (size - 1)));
+    return (size_t)BITS - __pony_clzzu(size) - (!(size & (size - 1)));
 
   return 0;
 }
 
-size_t ponyint_pool_size(size_t index)
+size_t ponyint_pool_used_size(size_t size)
 {
-  return (size_t)1 << (POOL_MIN_BITS + index);
+  size_t index = ponyint_pool_index(size);
+
+  if(index < POOL_COUNT)
+    return POOL_SIZE(index);
+
+  return ponyint_pool_adjust_size(size);
 }
 
 size_t ponyint_pool_adjust_size(size_t size)

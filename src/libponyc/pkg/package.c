@@ -820,7 +820,7 @@ bool handle_path_list(const char* paths, path_fn f, pass_opt_t* opt)
     } else {
       char path[FILENAME_MAX];
 
-      strncpy(path, paths, len);
+      memcpy(path, paths, len);
       path[len] = '\0';
       ok = f(path, opt) && ok;
     }
@@ -864,7 +864,7 @@ void package_add_magic_path(const char* path, const char* mapped_path,
   magic_package_t* n = POOL_ALLOC(magic_package_t);
   n->path = stringtab(path);
   n->src = NULL;
-  n->mapped_path = mapped_path;
+  n->mapped_path = stringtab(mapped_path);
   n->next = opt->magic_packages;
   opt->magic_packages = n;
 }

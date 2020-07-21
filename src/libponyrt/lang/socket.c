@@ -50,7 +50,7 @@ typedef int SOCKET;
 #include <linux/atm.h>
 #include <linux/dn.h>
 #include <linux/rds.h>
-#ifndef ALPINE_LINUX
+#if defined(__GLIBC__)
 #include <netatalk/at.h>
 #include <netax25/ax25.h>
 #include <netax25/ax25.h>
@@ -552,7 +552,7 @@ static asio_event_t* os_listen(pony_actor_t* owner, int fd,
 }
 
 static bool os_connect(pony_actor_t* owner, int fd, struct addrinfo *p,
-  const char* from)
+  const char* from, uint32_t asio_flags)
 {
   map_any_to_loopback(p->ai_addr);
 
@@ -600,8 +600,7 @@ static bool os_connect(pony_actor_t* owner, int fd, struct addrinfo *p,
   }
 
   // Create an event and subscribe it.
-  asio_event_t* ev = pony_asio_event_create(owner, fd, ASIO_READ | ASIO_WRITE,
-    0, true);
+  asio_event_t* ev = pony_asio_event_create(owner, fd, asio_flags, 0, true);
 
   if(!iocp_connect(ev, p))
   {
@@ -619,8 +618,7 @@ static bool os_connect(pony_actor_t* owner, int fd, struct addrinfo *p,
   }
 
   // Create an event and subscribe it.
-  pony_asio_event_create(owner, fd, ASIO_READ | ASIO_WRITE | ASIO_ONESHOT, 0,
-    true);
+  pony_asio_event_create(owner, fd, asio_flags, 0, true);
 #endif
 
   return true;
@@ -661,7 +659,8 @@ static asio_event_t* os_socket_listen(pony_actor_t* owner, const char* host,
  * in-flight, which may be 0.
  */
 static int os_socket_connect(pony_actor_t* owner, const char* host,
-  const char* service, const char* from, int family, int socktype, int proto)
+  const char* service, const char* from, int family, int socktype, int proto,
+  uint32_t asio_flags)
 {
   bool reuse = (from == NULL) || (from[0] != '\0');
 
@@ -677,7 +676,7 @@ static int os_socket_connect(pony_actor_t* owner, const char* host,
 
     if(fd != -1)
     {
-      if(os_connect(owner, fd, p, from))
+      if(os_connect(owner, fd, p, from, asio_flags))
         count++;
     }
 
@@ -731,24 +730,24 @@ PONY_API asio_event_t* pony_os_listen_udp6(pony_actor_t* owner,
 }
 
 PONY_API int pony_os_connect_tcp(pony_actor_t* owner, const char* host,
-  const char* service, const char* from)
+  const char* service, const char* from, uint32_t asio_flags)
 {
   return os_socket_connect(owner, host, service, from, AF_UNSPEC, SOCK_STREAM,
-    IPPROTO_TCP);
+    IPPROTO_TCP, asio_flags);
 }
 
 PONY_API int pony_os_connect_tcp4(pony_actor_t* owner, const char* host,
-  const char* service, const char* from)
+  const char* service, const char* from, uint32_t asio_flags)
 {
   return os_socket_connect(owner, host, service, from, AF_INET, SOCK_STREAM,
-    IPPROTO_TCP);
+    IPPROTO_TCP, asio_flags);
 }
 
 PONY_API int pony_os_connect_tcp6(pony_actor_t* owner, const char* host,
-  const char* service, const char* from)
+  const char* service, const char* from, uint32_t asio_flags)
 {
   return os_socket_connect(owner, host, service, from, AF_INET6, SOCK_STREAM,
-    IPPROTO_TCP);
+    IPPROTO_TCP, asio_flags);
 }
 
 PONY_API int pony_os_accept(asio_event_t* ev)
@@ -5103,6 +5102,18 @@ PONY_API int pony_os_sockopt_option(int option)
 #endif
 #ifdef UDP_VENDOR
     case 1097: return UDP_VENDOR;
+#endif
+#ifdef SO_RCVTIMEO_OLD
+    case 1098: return SO_RCVTIMEO_OLD;
+#endif
+#ifdef SO_RCVTIMEO_NEW
+    case 1099: return SO_RCVTIMEO_NEW;
+#endif
+#ifdef SO_SNDTIMEO_OLD
+    case 1100: return SO_SNDTIMEO_OLD;
+#endif
+#ifdef SO_SNDTIMEO_NEW
+    case 1101: return SO_SNDTIMEO_NEW;
 #endif
     default: return -1;
   }

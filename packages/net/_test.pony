@@ -1,3 +1,4 @@
+use "files"
 use "ponytest"
 
 actor Main is TestList
@@ -10,11 +11,13 @@ actor Main is TestList
     end
     test(_TestTCPWritev)
     test(_TestTCPExpect)
+    test(_TestTCPExpectOverBufferSize)
     test(_TestTCPMute)
     test(_TestTCPUnmute)
     ifdef not windows then
       test(_TestTCPThrottle)
     end
+    test(_TestTCPProxy)
 
 class _TestPing is UDPNotify
   let _h: TestHelper
@@ -208,11 +211,28 @@ class iso _TestTCPExpect is UnitTest
   fun exclusion_group(): String => "network"
 
   fun ref apply(h: TestHelper) =>
+    h.expect_action("client connect")
     h.expect_action("client receive")
     h.expect_action("server receive")
     h.expect_action("expect received")
 
     _TestTCP(h)(_TestTCPExpectNotify(h, false), _TestTCPExpectNotify(h, true))
+
+class iso _TestTCPExpectOverBufferSize is UnitTest
+  """
+  Test expecting framed data with TCP.
+  """
+  fun name(): String => "net/TCP.expectoverbuffersize"
+  fun label(): String => "unreliable-osx"
+  fun exclusion_group(): String => "network"
+
+  fun ref apply(h: TestHelper) =>
+    h.expect_action("client connect")
+    h.expect_action("connected")
+    h.expect_action("accepted")
+
+    _TestTCP(h)(_TestTCPExpectOverBufferSizeNotify(h),
+      _TestTCPExpectOverBufferSizeNotify(h))
 
 class _TestTCPExpectNotify is TCPConnectionNotify
   let _h: TestHelper
@@ -226,8 +246,12 @@ class _TestTCPExpectNotify is TCPConnectionNotify
 
   fun ref accepted(conn: TCPConnection ref) =>
     conn.set_nodelay(true)
-    conn.expect(_expect)
-    _send(conn, "hi there")
+    try
+      conn.expect(_expect)?
+      _send(conn, "hi there")
+    else
+      _h.fail("expect threw an error")
+    end
 
   fun ref connect_failed(conn: TCPConnection ref) =>
     _h.fail_action("client connect failed")
@@ -235,7 +259,11 @@ class _TestTCPExpectNotify is TCPConnectionNotify
   fun ref connected(conn: TCPConnection ref) =>
     _h.complete_action("client connect")
     conn.set_nodelay(true)
-    conn.expect(_expect)
+    try
+      conn.expect(_expect)?
+    else
+      _h.fail("expect threw an error")
+    end
 
   fun ref expect(conn: TCPConnection ref, qty: USize): USize =>
     _h.complete_action("expect received")
@@ -270,7 +298,11 @@ class _TestTCPExpectNotify is TCPConnectionNotify
       _expect = 4
     end
 
-    conn.expect(_expect)
+    try
+      conn.expect(_expect)?
+    else
+      _h.fail("expect threw an error")
+    end
     true
 
   fun ref _send(conn: TCPConnection ref, data: String) =>
@@ -286,6 +318,35 @@ class _TestTCPExpectNotify is TCPConnectionNotify
     buf.push((len >> 0).u8())
     buf.append(data)
     conn.write(consume buf)
+
+class _TestTCPExpectOverBufferSizeNotify is TCPConnectionNotify
+  let _h: TestHelper
+  let _expect: USize = 6_000_000_000
+
+  new iso create(h: TestHelper) =>
+    _h = h
+
+  fun ref connect_failed(conn: TCPConnection ref) =>
+    _h.fail_action("client connect failed")
+
+  fun ref accepted(conn: TCPConnection ref) =>
+    conn.set_nodelay(true)
+    try
+      conn.expect(_expect)?
+      _h.fail("expect didn't error out")
+    else
+      _h.complete_action("accepted")
+    end
+
+  fun ref connected(conn: TCPConnection ref) =>
+    _h.complete_action("client connect")
+    conn.set_nodelay(true)
+    try
+      conn.expect(_expect)?
+      _h.fail("expect didn't error out")
+    else
+      _h.complete_action("connected")
+    end
 
 class iso _TestTCPWritev is UnitTest
   """
@@ -402,7 +463,6 @@ class _TestTCPMuteReceiveNotify is TCPConnectionNotify
 
   fun ref connect_failed(conn: TCPConnection ref) =>
     _h.fail_action("receiver connect failed")
-
 
 class _TestTCPMuteSendNotify is TCPConnectionNotify
   """
@@ -577,6 +637,35 @@ class _TestTCPThrottleSendNotify is TCPConnectionNotify
 
   fun ref sent(conn: TCPConnection ref, data: ByteSeq): ByteSeq =>
     if not _throttled_yet then
-      conn.write("this is more data that you won't ever read")
+      conn.write("this is more data that you won't ever read" * 10000)
     end
     data
+
+class _TestTCPProxy is UnitTest
+  """
+  Check that the proxy callback is called on creation of a TCPConnection.
+  """
+  fun name(): String => "net/TCPProxy"
+  fun exclusion_group(): String => "network"
+
+  fun ref apply(h: TestHelper) =>
+    h.expect_action("sender connected") 
+    h.expect_action("sender proxy request") 
+
+    _TestTCP(h)(_TestTCPProxyNotify(h),
+      _TestTCPProxyNotify(h))
+
+class _TestTCPProxyNotify is TCPConnectionNotify
+  let _h: TestHelper
+  new iso create(h: TestHelper) =>
+    _h = h
+
+  fun ref proxy_via(host: String, service: String): (String, String) =>
+    _h.complete_action("sender proxy request")
+    (host, service)
+    
+  fun ref connected(conn: TCPConnection ref) =>
+    _h.complete_action("sender connected")
+
+  fun ref connect_failed(conn: TCPConnection ref) =>
+    _h.fail_action("sender connect failed")

@@ -190,6 +190,80 @@ actor TCPConnection
   these platforms, you **must** call `unmute` on a muted connection to have
   it close. Without calling `unmute` the `TCPConnection` actor will never
   exit.
+
+  ## Proxy support
+
+  Using the `proxy_via` callback in a `TCPConnectionNotify` it is possible
+  to implement proxies. The function takes the intended destination host
+  and service as parameters and returns a 2-tuple of the proxy host and
+  service.
+
+  The proxy `TCPConnectionNotify` should decorate another implementation of
+  `TCPConnectionNotify` passing relevent data through.
+
+  ### Example proxy implementation
+
+  ```pony
+  actor Main
+    new create(env: Env) =>
+      MyClient.create(
+        "example.com", // we actually want to connect to this host
+        "80",
+        ExampleProxy.create("proxy.example.com", "80")) // we connect via this proxy
+
+  actor MyClient
+    new create(host: String, service: String, proxy: Proxy = NoProxy) =>
+      let conn: TCPConnection = TCPConnection.create(
+        env.root as AmbientAuth,
+        proxy.apply(MyConnectionNotify.create()),
+        host,
+        service)
+
+  class ExampleProxy is Proxy
+    let _proxy_host: String
+    let _proxy_service: String
+
+    new create(proxy_host: String, proxy_service: String) =>
+      _proxy_host = proxy_host
+      _proxy_service = proxy_service
+
+    fun apply(wrap: TCPConnectionNotify iso): TCPConnectionNotify iso^ =>
+      ExampleProxyNotify.create(consume wrap, _proxy_service, _proxy_service)
+
+  class iso ExampleProxyNotify is TCPConnectionNotify
+    // Fictional proxy implementation that has no error
+    // conditions, and always forwards the connection.
+    let _proxy_host: String
+    let _proxy_service: String
+    var _destination_host: (None | String) = None
+    var _destination_service: (None | String) = None
+    let _wrapped: TCPConnectionNotify iso
+
+    new iso create(wrap: TCPConnectionNotify iso, proxy_host: String, proxy_service: String) =>
+      _wrapped = wrap
+      _proxy_host = proxy_host
+      _proxy_service = proxy_service
+
+    fun ref proxy_via(host: String, service: String): (String, String) =>
+      // Stash the original host & service; return the host & service
+      // for the proxy; indicating that the initial TCP connection should
+      // be made to the proxy
+      _destination_host = host
+      _destination_service = service
+      (_proxy_host, _proxy_service)
+
+    fun ref connected(conn: TCPConnection ref) =>
+      // conn is the connection to the *proxy* server. We need to ask the
+      // proxy server to forward this connection to our intended final
+      // destination.
+      conn.write((_destination_host + "\n").array())
+      conn.write((_destination_service + "\n").array())
+      wrapped.connected(conn)
+
+    fun ref received(conn, data, times) => _wrapped.received(conn, data, times)
+    fun ref connect_failed(conn: TCPConnection ref) => None
+  ```
+  
   """
   var _listen: (TCPListener | None) = None
   var _notify: TCPConnectionNotify
@@ -198,26 +272,27 @@ actor TCPConnection
   var _event: AsioEventID = AsioEvent.none()
   var _connected: Bool = false
   var _readable: Bool = false
+  var _reading: Bool = false
   var _writeable: Bool = false
   var _throttled: Bool = false
   var _closed: Bool = false
   var _shutdown: Bool = false
   var _shutdown_peer: Bool = false
   var _in_sent: Bool = false
-  // _pending is used to avoid GC prematurely reaping memory.
-  // See GitHub bug 2526 for more.  It looks like a write-only
-  // data structure, but its use is vital to avoid GC races:
-  // _pending_writev's C pointers are invisible to ORCA.
-  embed _pending: Array[ByteSeq] = _pending.create()
-  embed _pending_writev: Array[USize] = _pending_writev.create()
+  embed _pending_writev_posix: Array[(Pointer[U8] tag, USize)] = _pending_writev_posix.create()
+  embed _pending_writev_windows: Array[(USize, Pointer[U8] tag)] = _pending_writev_windows.create()
+
   var _pending_sent: USize = 0
   var _pending_writev_total: USize = 0
   var _read_buf: Array[U8] iso
+  var _read_buf_offset: USize = 0
+  var _max_received_called: USize = 50
 
-  var _next_size: USize
-  let _max_size: USize
+  let _read_buffer_size: USize
 
-  var _read_len: USize = 0
+  let _yield_after_reading: USize
+  let _yield_after_writing: USize
+
   var _expect: USize = 0
 
   var _muted: Bool = false
@@ -228,20 +303,29 @@ actor TCPConnection
     host: String,
     service: String,
     from: String = "",
-    init_size: USize = 64,
-    max_size: USize = 16384)
+    read_buffer_size: USize = 16384,
+    yield_after_reading: USize = 16384,
+    yield_after_writing: USize = 16384)
   =>
     """
     Connect via IPv4 or IPv6. If `from` is a non-empty string, the connection
     will be made from the specified interface.
     """
-    _read_buf = recover Array[U8] .> undefined(init_size) end
-    _next_size = init_size
-    _max_size = max_size
+    _read_buf = recover Array[U8] .> undefined(read_buffer_size) end
+    _read_buffer_size = read_buffer_size
+    _yield_after_reading = yield_after_reading
+    _yield_after_writing = yield_after_writing
     _notify = consume notify
+    let asio_flags =
+      ifdef not windows then
+        AsioEvent.read_write_oneshot()
+      else
+        AsioEvent.read_write()
+      end
+    (let host', let service') = _notify.proxy_via(host, service)
     _connect_count =
-      @pony_os_connect_tcp[U32](this, host.cstring(), service.cstring(),
-        from.cstring())
+      @pony_os_connect_tcp[U32](this, host'.cstring(), service'.cstring(),
+        from.cstring(), asio_flags)
     _notify_connecting()
 
   new ip4(
@@ -250,19 +334,28 @@ actor TCPConnection
     host: String,
     service: String,
     from: String = "",
-    init_size: USize = 64,
-    max_size: USize = 16384)
+    read_buffer_size: USize = 16384,
+    yield_after_reading: USize = 16384,
+    yield_after_writing: USize = 16384)
   =>
     """
     Connect via IPv4.
     """
-    _read_buf = recover Array[U8] .> undefined(init_size) end
-    _next_size = init_size
-    _max_size = max_size
+    _read_buf = recover Array[U8] .> undefined(read_buffer_size) end
+    _read_buffer_size = read_buffer_size
+    _yield_after_reading = yield_after_reading
+    _yield_after_writing = yield_after_writing
     _notify = consume notify
+    let asio_flags =
+      ifdef not windows then
+        AsioEvent.read_write_oneshot()
+      else
+        AsioEvent.read_write()
+      end
+    (let host', let service') = _notify.proxy_via(host, service)
     _connect_count =
-      @pony_os_connect_tcp4[U32](this, host.cstring(), service.cstring(),
-        from.cstring())
+      @pony_os_connect_tcp4[U32](this, host'.cstring(), service'.cstring(),
+        from.cstring(), asio_flags)
     _notify_connecting()
 
   new ip6(
@@ -271,27 +364,37 @@ actor TCPConnection
     host: String,
     service: String,
     from: String = "",
-    init_size: USize = 64,
-    max_size: USize = 16384)
+    read_buffer_size: USize = 16384,
+    yield_after_reading: USize = 16384,
+    yield_after_writing: USize = 16384)
   =>
     """
     Connect via IPv6.
     """
-    _read_buf = recover Array[U8] .> undefined(init_size) end
-    _next_size = init_size
-    _max_size = max_size
+    _read_buf = recover Array[U8] .> undefined(read_buffer_size) end
+    _read_buffer_size = read_buffer_size
+    _yield_after_reading = yield_after_reading
+    _yield_after_writing = yield_after_writing
     _notify = consume notify
+    let asio_flags =
+      ifdef not windows then
+        AsioEvent.read_write_oneshot()
+      else
+        AsioEvent.read_write()
+      end
+    (let host', let service') = _notify.proxy_via(host, service)
     _connect_count =
-      @pony_os_connect_tcp6[U32](this, host.cstring(), service.cstring(),
-        from.cstring())
+      @pony_os_connect_tcp6[U32](this, host'.cstring(), service'.cstring(),
+        from.cstring(), asio_flags)
     _notify_connecting()
 
   new _accept(
     listen: TCPListener,
     notify: TCPConnectionNotify iso,
     fd: U32,
-    init_size: USize = 64,
-    max_size: USize = 16384)
+    read_buffer_size: USize = 16384,
+    yield_after_reading: USize = 16384,
+    yield_after_writing: USize = 16384)
   =>
     """
     A new connection accepted on a server.
@@ -312,9 +415,10 @@ actor TCPConnection
       @pony_asio_event_set_writeable(_event, true)
     end
     _writeable = true
-    _read_buf = recover Array[U8] .> undefined(init_size) end
-    _next_size = init_size
-    _max_size = max_size
+    _read_buf = recover Array[U8] .> undefined(read_buffer_size) end
+    _read_buffer_size = read_buffer_size
+    _yield_after_reading = yield_after_reading
+    _yield_after_writing = yield_after_writing
 
     _notify.accepted(this)
 
@@ -345,19 +449,22 @@ actor TCPConnection
         try
           var num_to_send: I32 = 0
           for bytes in _notify.sentv(this, data).values() do
+            // don't sent 0 byte payloads; windows doesn't like it (and it's wasteful)
+            if bytes.size() == 0 then
+              continue
+            end
+
             // Add an IOCP write.
-            _pending_writev
-              .> push(bytes.size())
-              .> push(bytes.cpointer().usize())
+            _pending_writev_windows
+              .> push((bytes.size(), bytes.cpointer()))
             _pending_writev_total = _pending_writev_total + bytes.size()
-            _pending.push(bytes)
             num_to_send = num_to_send + 1
           end
 
           // Write as much data as possible.
           var len =
             @pony_os_writev[USize](_event,
-              _pending_writev.cpointer(_pending_sent * 2),
+              _pending_writev_windows.cpointer(_pending_sent),
               num_to_send) ?
 
           _pending_sent = _pending_sent + num_to_send.usize()
@@ -371,11 +478,14 @@ actor TCPConnection
         end
       else
         for bytes in _notify.sentv(this, data).values() do
-          _pending_writev
-            .> push(bytes.cpointer().usize())
-            .> push(bytes.size())
+          // don't sent 0 byte payloads; it's wasteful
+          if bytes.size() == 0 then
+            continue
+          end
+
+          _pending_writev_posix
+            .> push((bytes.cpointer(), bytes.size()))
           _pending_writev_total = _pending_writev_total + bytes.size()
-          _pending.push(bytes)
         end
 
         _pending_writes()
@@ -396,7 +506,9 @@ actor TCPConnection
     Start reading off this TCPConnection again after having been muted.
     """
     _muted = false
-    _pending_reads()
+    if not _reading then
+      _pending_reads()
+    end
 
   be set_notify(notify: TCPConnectionNotify iso) =>
     """
@@ -428,15 +540,23 @@ actor TCPConnection
     @pony_os_peername[Bool](_fd, ip)
     ip
 
-  fun ref expect(qty: USize = 0) =>
+  fun ref expect(qty: USize = 0) ? =>
     """
     A `received` call on the notifier must contain exactly `qty` bytes. If
     `qty` is zero, the call can contain any amount of data. This has no effect
     if called in the `sent` notifier callback.
+
+    Errors if `qty` exceeds the max buffer size as indicated by the
+    `read_buffer_size` supplied when the connection was created.
     """
-    if not _in_sent then
-      _expect = _notify.expect(this, qty)
-      _read_buf_size()
+
+    if qty <= _read_buffer_size then
+      if not _in_sent then
+        _expect = _notify.expect(this, qty)
+        _read_buf_size()
+      end
+    else
+      error
     end
 
   fun ref set_nodelay(state: Bool) =>
@@ -557,16 +677,20 @@ actor TCPConnection
     that has already been transformed by the notifier. Data will be silently
     discarded if the connection has not yet been established though.
     """
+    // don't sent 0 byte payloads; windows doesn't like it (and it's wasteful)
+    if data.size() == 0 then
+      return
+    end
+
     if _connected and not _closed then
       ifdef windows then
         try
           // Add an IOCP write.
-          _pending_writev .> push(data.size()) .> push(data.cpointer().usize())
+          _pending_writev_windows .> push((data.size(), data.cpointer()))
           _pending_writev_total = _pending_writev_total + data.size()
-          _pending.push(data)
 
           @pony_os_writev[USize](_event,
-            _pending_writev.cpointer(_pending_sent * 2), I32(1)) ?
+            _pending_writev_windows.cpointer(_pending_sent), I32(1)) ?
 
           _pending_sent = _pending_sent + 1
 
@@ -578,9 +702,8 @@ actor TCPConnection
           end
         end
       else
-        _pending_writev .> push(data.cpointer().usize()) .> push(data.size())
+        _pending_writev_posix .> push((data.cpointer(), data.size()))
         _pending_writev_total = _pending_writev_total + data.size()
-        _pending.push(data)
         _pending_writes()
       end
     end
@@ -593,13 +716,13 @@ actor TCPConnection
     ifdef windows then
       if len == 0 then
         // IOCP reported a failed write on this chunk. Non-graceful shutdown.
-        _hard_close()
+        hard_close()
         return
       end
 
       try
         _manage_pending_buffer(len.usize(),
-          _pending_writev_total, _pending.size())?
+          _pending_writev_total, _pending_writev_windows.size())?
       end
 
       if _pending_sent < 16 then
@@ -609,6 +732,12 @@ actor TCPConnection
         _release_backpressure()
       end
     end
+
+  be _write_again() =>
+    """
+    Resume writing.
+    """
+    _pending_writes()
 
   fun ref _pending_writes(): Bool =>
     """
@@ -621,32 +750,41 @@ actor TCPConnection
       let writev_batch_size: USize = @pony_os_writev_max[I32]().usize()
       var num_to_send: USize = 0
       var bytes_to_send: USize = 0
+      var bytes_sent: USize = 0
       while _writeable and (_pending_writev_total > 0) do
+        if bytes_sent >= _yield_after_writing then
+          // We've written _yield_after_writing bytes.
+          // Yield and write again later.
+          _write_again()
+          return false
+        end
         try
           // Determine number of bytes and buffers to send.
-          if (_pending_writev.size() / 2) < writev_batch_size then
-            num_to_send = _pending_writev.size() / 2
+          if _pending_writev_posix.size() < writev_batch_size then
+            num_to_send = _pending_writev_posix.size()
             bytes_to_send = _pending_writev_total
           else
             // Have more buffers than a single writev can handle.
             // Iterate over buffers being sent to add up total.
             num_to_send = writev_batch_size
             bytes_to_send = 0
-            for d in Range[USize](1, num_to_send * 2, 2) do
-              bytes_to_send = bytes_to_send + _pending_writev(d)?
+            for d in Range[USize](0, num_to_send, 1) do
+              bytes_to_send = bytes_to_send + _pending_writev_posix(d)?._2
             end
           end
 
           // Write as much data as possible.
           var len = @pony_os_writev[USize](_event,
-            _pending_writev.cpointer(), num_to_send.i32()) ?
+            _pending_writev_posix.cpointer(), num_to_send.i32()) ?
 
           if _manage_pending_buffer(len, bytes_to_send, num_to_send)? then
             return true
           end
+
+          bytes_sent = bytes_sent + len
         else
           // Non-graceful shutdown on error.
-          _hard_close()
+          hard_close()
         end
       end
     end
@@ -665,40 +803,39 @@ actor TCPConnection
     """
     var len = bytes_sent
     if len < bytes_to_send then
+      var num_sent: USize = 0
       while len > 0 do
-        let iov_p =
+        (let iov_p, let iov_s) =
           ifdef windows then
-            _pending_writev(1)?
+            (let tmp_s, let tmp_p) = _pending_writev_windows(num_sent)?
+            (tmp_p, tmp_s)
           else
-            _pending_writev(0)?
-          end
-        let iov_s =
-          ifdef windows then
-            _pending_writev(0)?
-          else
-            _pending_writev(1)?
+            _pending_writev_posix(num_sent)?
           end
         if iov_s <= len then
+          num_sent = num_sent + 1
           len = len - iov_s
-          _pending_writev.shift()?
-          _pending_writev.shift()?
-          _pending.shift()?
-          ifdef windows then
-            _pending_sent = _pending_sent - 1
-          end
           _pending_writev_total = _pending_writev_total - iov_s
         else
           ifdef windows then
-            _pending_writev.update(1, iov_p+len)?
-            _pending_writev.update(0, iov_s-len)?
+            _pending_writev_windows(num_sent)? = (iov_s-len, iov_p.offset(len))
           else
-            _pending_writev.update(0, iov_p+len)?
-            _pending_writev.update(1, iov_s-len)?
+            _pending_writev_posix(num_sent)? = (iov_p.offset(len), iov_s-len)
           end
           _pending_writev_total = _pending_writev_total - len
           len = 0
         end
       end
+
+      ifdef windows then
+        // do a trim in place instead of many shifts for efficiency
+        _pending_writev_windows.trim_in_place(num_sent)
+        _pending_sent = _pending_sent - num_sent
+      else
+        // do a trim in place instead of many shifts for efficiency
+        _pending_writev_posix.trim_in_place(num_sent)
+      end
+
       ifdef not windows then
         _apply_backpressure()
       end
@@ -706,20 +843,23 @@ actor TCPConnection
       // sent all data we requested in this batch
       _pending_writev_total = _pending_writev_total - bytes_to_send
       if _pending_writev_total == 0 then
-        _pending_writev.clear()
-        _pending.clear()
         ifdef windows then
+          // do a trim in place instead of a clear to free up memory
+          _pending_writev_windows.trim_in_place(_pending_writev_windows.size())
           _pending_sent = 0
+        else
+          // do a trim in place instead of a clear to free up memory
+          _pending_writev_posix.trim_in_place(_pending_writev_posix.size())
         end
         return true
       else
-        for d in Range[USize](0, num_to_send, 1) do
-          _pending_writev.shift()?
-          _pending_writev.shift()?
-          _pending.shift()?
-          ifdef windows then
-            _pending_sent = _pending_sent - 1
-          end
+        ifdef windows then
+          // do a trim in place instead of many shifts for efficiency
+          _pending_writev_windows.trim_in_place(num_to_send)
+          _pending_sent = _pending_sent - num_to_send
+        else
+          // do a trim in place instead of many shifts for efficiency
+          _pending_writev_posix.trim_in_place(num_to_send)
         end
       end
     end
@@ -732,24 +872,23 @@ actor TCPConnection
     This occurs only with IOCP on Windows.
     """
     ifdef windows then
-      match len.usize()
-      | 0 =>
+      if len == 0 then
         // The socket has been closed from the other side, or a hard close has
         // cancelled the queued read.
         _readable = false
         _shutdown_peer = true
         close()
         return
-      | _next_size =>
-        _next_size = _max_size.min(_next_size * 2)
       end
 
-      _read_len = _read_len + len.usize()
+      _read_buf_offset = _read_buf_offset + len.usize()
 
-      if (not _muted) and (_read_len >= _expect) then
-        let data = _read_buf = recover Array[U8] end
-        data.truncate(_read_len)
-        _read_len = 0
+      while (not _muted) and (_read_buf_offset >= _expect)
+        and (_read_buf_offset > 0) do
+        // get data to be distributed and update `_read_buf_offset`
+        let chop_at = if _expect == 0 then _read_buf_offset else _expect end
+        (let data, _read_buf) = (consume _read_buf).chop(chop_at)
+        _read_buf_offset = _read_buf_offset - chop_at
 
         _notify.received(this, consume data, 1)
         _read_buf_size()
@@ -760,12 +899,10 @@ actor TCPConnection
 
   fun ref _read_buf_size() =>
     """
-    Resize the read buffer.
+    Resize the read buffer if it is empty or smaller than the next payload size
     """
-    if _expect != 0 then
-      _read_buf.undefined(_expect)
-    else
-      _read_buf.undefined(_next_size)
+    if _read_buf.size() <= _expect then
+      _read_buf.undefined(_read_buffer_size)
     end
 
   fun ref _queue_read() =>
@@ -776,80 +913,95 @@ actor TCPConnection
       try
         @pony_os_recv[USize](
           _event,
-          _read_buf.cpointer(_read_len),
-          _read_buf.size() - _read_len) ?
+          _read_buf.cpointer(_read_buf_offset),
+          _read_buf.size() - _read_buf_offset) ?
       else
-        _hard_close()
+        hard_close()
       end
     end
 
   fun ref _pending_reads() =>
     """
     Unless this connection is currently muted, read while data is available,
-    guessing the next packet length as we go. If we read 4 kb of data, send
+    guessing the next packet length as we go. If we read 5 kb of data, send
     ourself a resume message and stop reading, to avoid starving other actors.
+    Currently we can handle a varying value of _expect (greater than 0) and
+    constant _expect of 0 but we cannot handle switching between these two
+    cases.
     """
     ifdef not windows then
       try
         var sum: USize = 0
         var received_called: USize = 0
+        _reading = true
 
         while _readable and not _shutdown_peer do
+          // exit if muted
           if _muted then
+            _reading = false
             return
           end
+
+          // distribute the data we've already read that is in the `read_buf`
+          // and able to be distributed
+          while (_read_buf_offset >= _expect) and (_read_buf_offset > 0) do
+            // get data to be distributed and update `_read_buf_offset`
+            let chop_at = if _expect == 0 then _read_buf_offset else _expect end
+            (let data, _read_buf) = (consume _read_buf).chop(chop_at)
+            _read_buf_offset = _read_buf_offset - chop_at
+
+            // increment max reads
+            received_called = received_called + 1
+
+            // check if we should yield to let another actor run
+            if (not _notify.received(this, consume data,
+              received_called))
+              or (received_called >= _max_received_called)
+            then
+              _read_again()
+              _reading = false
+              return
+            end
+          end
+
+          if sum >= _yield_after_reading then
+            // If we've read _yield_after_reading bytes
+            // yield and read again later.
+            _read_again()
+            _reading = false
+            return
+          end
+
+          _read_buf_size()
 
           // Read as much data as possible.
           let len = @pony_os_recv[USize](
             _event,
-            _read_buf.cpointer(_read_len),
-            _read_buf.size() - _read_len) ?
+            _read_buf.cpointer(_read_buf_offset),
+            _read_buf.size() - _read_buf_offset) ?
 
-          match len
-          | 0 =>
+          if len == 0 then
             // Would block, try again later.
             // this is safe because asio thread isn't currently subscribed
             // for a read event so will not be writing to the readable flag
-            @pony_asio_event_set_readable(_event, false)
+            @pony_asio_event_set_readable[None](_event, false)
             _readable = false
+            _reading = false
             @pony_asio_event_resubscribe_read(_event)
             return
-          | _next_size =>
-            // Increase the read buffer size.
-            _next_size = _max_size.min(_next_size * 2)
           end
 
-          _read_len = _read_len + len
-
-          if _read_len >= _expect then
-            let data = _read_buf = recover Array[U8] end
-            data.truncate(_read_len)
-            _read_len = 0
-
-            received_called = received_called + 1
-            if not _notify.received(this, consume data, received_called) then
-              _read_buf_size()
-              _read_again()
-              return
-            else
-              _read_buf_size()
-            end
-          end
-
+          _read_buf_offset = _read_buf_offset + len
           sum = sum + len
-
-          if sum >= _max_size then
-            // If we've read _max_size, yield and read again later.
-            _read_again()
-            return
-          end
         end
       else
         // The socket has been closed from the other side.
         _shutdown_peer = true
-        close()
+        hard_close()
       end
     end
+
+    _reading = false
 
   fun ref _notify_connecting() =>
     """
@@ -859,7 +1011,7 @@ actor TCPConnection
       _notify.connecting(this, _connect_count)
     else
       _notify.connect_failed(this)
-      _hard_close()
+      hard_close()
     end
 
   fun ref close() =>
@@ -873,7 +1025,7 @@ actor TCPConnection
       _close()
     else
       if _muted then
-        _hard_close()
+        hard_close()
       else
         _close()
       end
@@ -907,7 +1059,7 @@ actor TCPConnection
     end
 
     if _connected and _shutdown and _shutdown_peer then
-      _hard_close()
+      hard_close()
     end
 
     ifdef windows then
@@ -918,7 +1070,7 @@ actor TCPConnection
       end
     end
 
-  fun ref _hard_close() =>
+  fun ref hard_close() =>
     """
     When an error happens, do a non-graceful close.
     """
@@ -931,11 +1083,12 @@ actor TCPConnection
     _shutdown = true
     _shutdown_peer = true
 
-    _pending.clear()
-    _pending_writev.clear()
     _pending_writev_total = 0
     ifdef windows then
+      _pending_writev_windows.clear()
       _pending_sent = 0
+    else
+      _pending_writev_posix.clear()
     end
 
     ifdef not windows then

@@ -1032,7 +1032,7 @@ TEST_F(BadPonyTest, ThisViewpointWithIsoReceiver)
   TEST_ERRORS_1(src, "argument not a subtype of parameter");
 }
 
-TEST_F(BadPonyTest, DisallowPointerAndMaybePointerInEmbeededType)
+TEST_F(BadPonyTest, DisallowPointerAndMaybePointerInEmbeddedType)
 {
   // From issue #2596
   const char* src =
@@ -1041,7 +1041,7 @@ TEST_F(BadPonyTest, DisallowPointerAndMaybePointerInEmbeededType)
     "class Whoops\n"
     "  embed ok: Ok = Ok\n"
     "  embed not_ok: Pointer[None] = Pointer[None]\n"
-    "  embed also_not_ok: MaybePointer[Ok] = MaybePointer[Ok](Ok)\n"
+    "  embed also_not_ok: NullablePointer[Ok] = NullablePointer[Ok](Ok)\n"
     
     "actor Main\n"
     "new create(env: Env) =>\n"
@@ -1050,4 +1050,37 @@ TEST_F(BadPonyTest, DisallowPointerAndMaybePointerInEmbeededType)
   TEST_ERRORS_2(src,
     "embedded fields must be classes or structs",
     "embedded fields must be classes or structs")
+}
+
+TEST_F(BadPonyTest, AllowAliasForNonEphemeralReturn)
+{
+  const char* src =
+    "class iso Inner\n"
+    "  new iso create() => None\n"
+
+    "class Container[A: Inner #any]\n"
+    "  var inner: A\n"
+    "  new create(inner': A) => inner = consume inner'\n"
+    "  fun get_1(): this->A => inner                        // works\n"
+    "  fun get_2(): this->A => let tmp = inner; consume tmp // also works\n"
+
+    "actor Main\n"
+    "  new create(env: Env) =>\n"
+    "    let o = Container[Inner iso](Inner)\n"
+    "    let i_1 : Inner tag = o.get_1()\n"
+    "    let i_2 : Inner tag = o.get_2()";
+
+  TEST_COMPILE(src);
+}
+
+TEST_F(BadPonyTest, AllowNestedTupleAccess)
+{
+  // From issue #3354
+  const char* src =
+    "actor Main\n"
+    "  new create(env: Env) =>\n"
+    "        let x = (1, (2, 3))._2._1";
+
+  TEST_ERRORS_1(src,
+    "Cannot look up member _2 on a literal")
 }

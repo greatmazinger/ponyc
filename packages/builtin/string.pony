@@ -410,19 +410,19 @@ actor Main
     """
     Chops the string in half at the split point requested and returns both
     the left and right portions. The original string is trimmed in place and
-    returned as the right portion. If the split point is larger than the
+    returned as the left portion. If the split point is larger than the
     string, the left portion is the original string and the right portion
     is a new empty string.
     Both strings are isolated and mutable, as they do not share memory.
     The operation does not allocate a new string pointer nor copy elements.
     """
-    let start_ptr = _ptr
-    let size' = _size.min(split_point)
-    let alloc = if size' == _size then _alloc else split_point end
+    let start_ptr = cpointer(split_point)
+    let size' = _size - _size.min(split_point)
+    let alloc = _alloc - _size.min(split_point)
 
-    trim_in_place(split_point)
+    trim_in_place(0, split_point)
 
-    let left = recover
+    let right = recover
       if size' > 0 then
         from_cpointer(start_ptr._unsafe(), size', alloc)
       else
@@ -430,7 +430,49 @@ actor Main
       end
     end
 
-    (consume left, consume this)
+    (consume this, consume right)
+
+  fun iso unchop(b: String iso): ((String iso^, String iso^) | String iso^) =>
+    """
+    Unchops two iso strings to return the original string they were chopped
+    from. Both input strings are isolated and mutable and were originally
+    chopped from a single string. This function checks that they are indeed two
+    strings chopped from the same original string and can be unchopped before
+    doing the unchopping and returning the unchopped string. If the two strings
+    cannot be unchopped it returns both strings without modifying them.
+    The operation does not allocate a new string pointer nor copy elements.
+    """
+    if _size == 0 then
+      return consume b
+    end
+
+    if b.size() == 0 then
+      return consume this
+    end
+
+    (let unchoppable, let a_left) =
+      if (_size == _alloc) and (cpointer(_size) == b.cpointer()) then
+        (true, true)
+      elseif (b.size() == b.space()) and (b.cpointer(b.size()) == cpointer())
+        then
+        (true, false)
+      else
+        (false, false)
+      end
+
+    if not unchoppable then
+      return (consume this, consume b)
+    end
+
+    if a_left then
+      _alloc = _alloc + b._alloc
+      _size = _size + b._size
+      consume this
+    else
+      b._alloc = b._alloc + _alloc
+      b._size = b._size + _size
+      consume b
+    end
 
   fun is_null_terminated(): Bool =>
     """
@@ -570,6 +612,30 @@ actor Main
     str._size = len
     str._set(len, 0)
     str
+
+  fun repeat_str(num: USize = 1, sep: String = ""): String iso^ =>
+    """
+    Returns a copy of the string repeated `num` times with an optional
+    separator added inbetween repeats.
+    """
+    var c = num
+    var str = recover String((_size + sep.size()) * c) end
+
+    while c > 0 do
+      c = c - 1
+      str = (consume str)._append(this)
+      if (sep.size() > 0) and (c != 0) then
+        str = (consume str)._append(sep)
+      end
+    end
+
+    consume str
+
+  fun mul(num: USize): String iso^ =>
+    """
+    Returns a copy of the string repeated `num` times.
+    """
+    repeat_str(num)
 
   fun find(s: String box, offset: ISize = 0, nth: USize = 0): ISize ? =>
     """
@@ -1033,12 +1099,32 @@ actor Main
     """
     Split the string into an array of strings that are delimited by `delim` in
     the original string. If `n > 0`, then the split count is limited to n.
+    
+    Example:
+
+    ```pony
+    let original: String = "<b><span>Hello!</span></b>"
+    let delimiter: String = "><"
+    let split_array: Array[String] = original.split_by(delimiter)
+    env.out.print("OUTPUT:")
+    for value in split_array.values() do
+      env.out.print(value)
+    end
+
+    // OUTPUT:
+    // <b
+    // span>Hello!</span
+    // b>
+    ```
 
     Adjacent delimiters result in a zero length entry in the array. For
-    example, `"1,,2".split(",") => ["1", "", "2"]`.
+    example, `"1CutCut2".split_by("Cut") => ["1", "", "2"]`.
 
     An empty delimiter results in an array that contains a single element equal
     to the whole string.
+
+    If you want to split the string with each individual character of `delim`,
+    use [`split`](#split).
     """
     let delim_size = ISize.from[USize](delim.size())
     let total_size = ISize.from[USize](size())
@@ -1058,12 +1144,32 @@ actor Main
 
   fun split(delim: String = " \t\v\f\r\n", n: USize = 0): Array[String] iso^ =>
     """
-    Split the string into an array of strings. Any character in the delimiter
-    string is accepted as a delimiter. If `n > 0`, then the split count is
-    limited to n.
+    Split the string into an array of strings with any character in the
+    delimiter string. By default, the string is split with whitespace
+    characters. If `n > 0`, then the split count is limited to n.
+    
+    Example:
+
+    ```pony
+    let original: String = "name,job;department"
+    let delimiter: String = ".,;"
+    let split_array: Array[String] = original.split(delimiter)
+    env.out.print("OUTPUT:")
+    for value in split_array.values() do
+      env.out.print(value)
+    end
+
+    // OUTPUT:
+    // name
+    // job
+    // department
+    ```
 
     Adjacent delimiters result in a zero length entry in the array. For
     example, `"1,,2".split(",") => ["1", "", "2"]`.
+
+    If you want to split the string with the entire delimiter string `delim`,
+    use [`split_by`](#split_by).
     """
     let result = recover Array[String] end
 

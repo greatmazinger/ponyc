@@ -12,6 +12,9 @@ actor Main is TestList
 
   fun tag tests(test: PonyTest) =>
     test(_TestMkdtemp)
+  ifdef not windows then
+    test(_TestSymlink)
+  end
     test(_TestWalk)
     test(_TestDirectoryOpen)
     test(_TestDirectoryFileOpen)
@@ -47,6 +50,8 @@ actor Main is TestList
     test(_TestFileWritevLarge)
     test(_TestFileFlush)
     test(_TestFileReadMore)
+    test(_TestFileRemoveReadOnly)
+    test(_TestDirectoryRemoveReadOnly)
     test(_TestFileLinesEmptyFile)
     test(_TestFileLinesSingleLine)
     test(_TestFileLinesMultiLine)
@@ -136,6 +141,51 @@ class iso _TestWalk is UnitTest
       h.assert_true(top.remove())
     end
 
+class iso _TestSymlink is UnitTest
+  var tmp_dir: (FilePath | None) = None
+
+  fun ref set_up(h: TestHelper) ? =>
+    tmp_dir = FilePath.mkdtemp(h.env.root as AmbientAuth, "symlink")?
+
+  fun ref tear_down(h: TestHelper) =>
+    try
+      (tmp_dir as FilePath).remove()
+    end
+
+  fun name(): String => "files/FilePath.symlink"
+
+  fun ref apply(h: TestHelper) ? =>
+    test_file(h)?
+    test_directory(h)?
+
+  fun ref test_file(h: TestHelper) ? =>
+    let target_path = (tmp_dir as FilePath).join("target_file")?
+    let content = "abcdef"
+    with target_file = CreateFile(target_path) as File do
+      h.assert_true(
+        target_file.write(content),
+        "could not write to file: " + target_path.path)
+    end
+
+    let link_path = (tmp_dir as FilePath).join("symlink_file")?
+    h.assert_true(
+      target_path.symlink(link_path),
+      "could not create symbolic link to: " + target_path.path)
+
+    with link_file = OpenFile(link_path) as File do
+      let fl = FileLines(link_file)
+      h.assert_true(fl.has_next())
+      h.assert_eq[String](fl.next()?, content)
+    end
+
+  fun ref test_directory(h: TestHelper) ? =>
+    let target_path = (tmp_dir as FilePath).join("target_dir")?
+    h.assert_true(target_path.mkdir(true))
+
+    let link_path = (tmp_dir as FilePath).join("symlink_dir")?
+    h.assert_true(
+      target_path.symlink(link_path),
+      "could not create symbolic link to: " + target_path.path)
 
 class iso _TestDirectoryOpen is UnitTest
   fun name(): String => "files/File.open.directory"
@@ -399,11 +449,11 @@ class iso _TestFileCreate is UnitTest
 
 class iso _TestFileCreateExistsNotWriteable is _NonRootTest
   fun name(): String => "files/File.create-exists-not-writeable"
-  fun apply_as_non_root(h: TestHelper) =>
+  fun apply_as_non_root(h: TestHelper) ? =>
+    let content = "unwriteable"
+    let path = "tmp.create-not-writeable"
+    let filepath = FilePath(h.env.root as AmbientAuth, path)?
     try
-      let content = "unwriteable"
-      let path = "tmp.create-not-writeable"
-      let filepath = FilePath(h.env.root as AmbientAuth, path)?
       let mode: FileMode ref = FileMode.>private()
       mode.owner_read = true
       mode.owner_write = false
@@ -422,12 +472,10 @@ class iso _TestFileCreateExistsNotWriteable is _NonRootTest
         let line = file2.read(6)
         h.assert_eq[USize](0, line.size(), "read on invalid file succeeded")
       end
-      mode.owner_read = true
-      mode.owner_write = true // required on Windows to delete the file
-      filepath.chmod(mode)
-      filepath.remove()
     else
       h.fail("Unhandled error!")
+    then
+      h.assert_true(filepath.remove())
     end
 
 
@@ -857,6 +905,49 @@ class iso _TestFileReadMore is UnitTest
         "File errno is not EOF after reading past the last byte")
     end
     path.remove()
+
+class iso _TestFileRemoveReadOnly is UnitTest
+  fun name(): String => "files/File.remove-readonly-file"
+  fun apply(h: TestHelper) ? =>
+    let path = FilePath(h.env.root as AmbientAuth, "tmp-read-only")?
+    try
+      with file = CreateFile(path) as File do
+        None
+      end
+
+      let mode: FileMode ref = FileMode
+      mode.owner_read = true
+      mode.owner_write = false
+      mode.group_read = true
+      mode.group_write = false
+      mode.any_read = true
+      mode.any_write = false
+      h.assert_true(path.chmod(mode))
+    then
+      h.assert_true(path.remove())
+    end
+
+class iso _TestDirectoryRemoveReadOnly is UnitTest
+  fun name(): String => "files/File.remove-readonly-directory"
+
+  fun apply(h: TestHelper) ? =>
+    let path = FilePath.mkdtemp(h.env.root as AmbientAuth, "tmp-read-only-dir")?
+    let dir = Directory(path)?
+    try
+      let mode: FileMode ref = FileMode
+      mode.owner_read = true
+      mode.owner_write = false
+      mode.owner_exec = true
+      mode.group_read = true
+      mode.group_write = false
+      mode.group_exec = true
+      mode.any_read = true
+      mode.any_write = false
+      mode.any_exec = true
+      h.assert_true(path.chmod(mode))
+    then
+      h.assert_true(path.remove())
+    end
 
 class iso _TestFileLinesEmptyFile is UnitTest
   var tmp_dir: (FilePath | None) = None

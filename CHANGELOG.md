@@ -6,12 +6,218 @@ All notable changes to the Pony compiler and standard library will be documented
 
 ### Fixed
 
+- Compile fix for the latest MSVC compiler (MSVC 19.26.28806.0, from Visual Studio 16.6.2) ([PR #3576](https://github.com/ponylang/ponyc/pull/3576))
+- Fix with expressions using tuple destructuring. ([PR #3586](https://github.com/ponylang/ponyc/pull/3586))
+- Fix typeparam check endless recursion ([PR #3589](https://github.com/ponylang/ponyc/pull/3589))
+- Force removing read-only files on Windows with `FilePath.remove()` ([PR #3588](https://github.com/ponylang/ponyc/pull/3588))
 
 ### Added
 
+- Added vs2019 preview support for building ponyc ([PR #3587](https://github.com/ponylang/ponyc/pull/3587))
 
 ### Changed
 
+- Change trn->trn to box to fix a soundness hole ([PR #3591](https://github.com/ponylang/ponyc/pull/3591))
+- Add LogLevel as argument to LogFormatter ([PR #3597](https://github.com/ponylang/ponyc/pull/3597))
+
+## [0.35.1] - 2020-05-13
+
+### Fixed
+
+- Fix incorrect Windows process waiting ([PR #3559](https://github.com/ponylang/ponyc/pull/3559))
+
+### Changed
+
+- Rename FreeBSD artifacts ([PR #3556](https://github.com/ponylang/ponyc/pull/3556))
+
+## [0.35.0] - 2020-05-11
+
+### Fixed
+
+- Fix CommandParser incorrectly handling multiple end-of-option delimiters ([PR #3541](https://github.com/ponylang/ponyc/pull/3541))
+- Correctly report process termination status in ProcessNotify.dispose() ([PR #3419](https://github.com/ponylang/ponyc/pull/3419))
+- Ensure non-blocking process wait and correctly report process exit status ([PR #3419](https://github.com/ponylang/ponyc/pull/3419))
+- Fix atomics usage related to actor muting for ARM ([PR #3552](https://github.com/ponylang/ponyc/pull/3552))
+
+### Added
+
+- Add Ubuntu18.04 builds ([PR #3545](https://github.com/ponylang/ponyc/pull/3545))
+
+### Changed
+
+- Ensure that waiting on a child process when using ProcessMonitor is non-blocking ([PR #3419](https://github.com/ponylang/ponyc/pull/3419))
+
+## [0.34.1] - 2020-05-07
+
+### Fixed
+
+- Fix unneeded dependency on Linux glibc systems ([PR #3538](https://github.com/ponylang/ponyc/pull/3538))
+
+## [0.34.0] - 2020-05-03
+
+### Added
+
+- Build Docker images for windows builds ([PR #3492](https://github.com/ponylang/ponyc/pull/3492))
+- Added support for VS Preview ([PR #3487](https://github.com/ponylang/ponyc/pull/3487))
+- Add nightly FreeBSD 12.1 builds ([PR #3502](https://github.com/ponylang/ponyc/pull/3502))
+- Add OSSockOpt constants added by Linux 5.1 kernel ([PR #3515](https://github.com/ponylang/ponyc/pull/3515))
+- Add prebuilt FreeBSD 12.1 builds for releases ([PR #3525](https://github.com/ponylang/ponyc/pull/3525))
+
+### Changed
+
+- Build PonyC using CMake ([PR #3234](https://github.com/ponylang/ponyc/pull/3234))
+- Update  supported FreeBSD version to 12.1 ([PR #3495](https://github.com/ponylang/ponyc/pull/3495))
+- Make clang our default compiler on Linux, macOS, and FreeBSD ([PR #3506](https://github.com/ponylang/ponyc/pull/3506))
+- schedule the cycle detector with higher priority using the inject queue ([PR #3507](https://github.com/ponylang/ponyc/pull/3507))
+- Update glibc Docker image based to Ubuntu 20 ([PR #3522](https://github.com/ponylang/ponyc/pull/3522))
+- Change supported Ubuntu version to Ubuntu 20 ([PR #3522](https://github.com/ponylang/ponyc/pull/3522))
+- Let processmonitor chdir before exec ([PR #3530](https://github.com/ponylang/ponyc/pull/3530))
+- Removed unused Unsupported error from ProcessMonitor([PR #3530](https://github.com/ponylang/ponyc/pull/3530))
+- Update ProcessMonitor errors to contain error messages ([PR #3532](https://github.com/ponylang/ponyc/pull/3532))
+
+## [0.33.2] - 2020-02-03
+
+### Fixed
+
+- fix cli issue when providing --help=false. ([PR #3442](https://github.com/ponylang/ponyc/pull/3442))
+- Fix linker error when creating symlinks on Windows ([PR #3444](https://github.com/ponylang/ponyc/pull/3444))
+- Fix "not match" and "not if" causing a syntax error ([PR #3449](https://github.com/ponylang/ponyc/pull/3449))
+
+### Added
+
+- LLVM 9.0.x support ([PR #3320](https://github.com/ponylang/ponyc/pull/3320))
+
+### Changed
+
+- Better error message for check_receiver_cap ([PR #3450](https://github.com/ponylang/ponyc/pull/3450))
+- Improved error for undefined but used left side of declarations ([PR #3451](https://github.com/ponylang/ponyc/pull/3451))
+
+## [0.33.1] - 2019-12-13
+
+### Fixed
+
+- Fix building ponyc with clang on Ubuntu ([PR #3378](https://github.com/ponylang/ponyc/pull/3378))
+- Fix error using latest VS2019 to build ponyc ([PR #3369](https://github.com/ponylang/ponyc/pull/3369))
+
+### Changed
+
+- Update default LLVM 7.1.0 ([PR #3377](https://github.com/ponylang/ponyc/pull/3377))
+
+## [0.33.0] - 2019-11-01
+
+### Fixed
+
+- Building ponyc with GCC 8+ ([PR #3345](https://github.com/ponylang/ponyc/pull/3345))
+
+### Added
+
+- Allow programmatic override of the default runtime options ([PR #3342](https://github.com/ponylang/ponyc/pull/3342))
+
+### Changed
+
+- `--ponythreads` has been renamed to `--ponymaxthreads` ([PR #3334](https://github.com/ponylang/ponyc/pull/3334))
+- All `--pony*` options that accept a value, will be checked for minimal values ([PR #3303](https://github.com/ponylang/ponyc/pull/3317))
+- Default to statically linking LLVM into ponyc ([PR #3355](https://github.com/ponylang/ponyc/pull/3355))
+
+## [0.32.0] - 2019-09-29
+
+### Added
+
+- Allow fields to be `consume`d (sometimes) ([PR #3304](https://github.com/ponylang/ponyc/pull/3304))
+- `--ponynoscale` option ([PR #3303](https://github.com/ponylang/ponyc/pull/3303))
+- `--ponyhelp` option to compiled program ([PR #3312](https://github.com/ponylang/ponyc/pull/3312))
+
+### Changed
+
+- Rename MaybePointer to NullablePointer ([PR #3293](https://github.com/ponylang/ponyc/pull/3293))
+- `--ponyminthreads` option can't be larger than `--ponythreads` ([PR #3303](https://github.com/ponylang/ponyc/pull/3303))
+- `--ponythreads` option can't be larger than cores available ([PR #3303](https://github.com/ponylang/ponyc/pull/3303))
+
+## [0.31.0] - 2019-08-31
+
+### Fixed
+
+- Fix static linking issue by changing the link order ([PR #3259](https://github.com/ponylang/ponyc/pull/3259))
+
+### Added
+
+- Add `--link-ldcmd` command line argument for overriding the `ld` command used for linking ([PR #3259](https://github.com/ponylang/ponyc/pull/3259))
+- Make builds with `musl` on `glibc` systems possible ([PR #3263](https://github.com/ponylang/ponyc/pull/3263))
+- Add `proxy_via(destination_host, destination_service)` to `TCPConnectionNotify` to allow TCP handlers to change the hostname & service from a TCPConnectionNotify before connecting ([PR #3230](https://github.com/ponylang/ponyc/pull/3230))
+- Add `add` and `sub` to `collections/persistent/Map` ([PR #3275](https://github.com/ponylang/ponyc/pull/3275))
+
+### Changed
+
+- Remove unnecessary argument to `Map.sub` ([PR #3275](https://github.com/ponylang/ponyc/pull/3275))
+- No longer supply AppImage as a release format ([PR #3288](https://github.com/ponylang/ponyc/pull/3288))
+
+## [0.30.0] - 2019-07-27
+
+### Fixed
+
+- Fix `which dtrace` path check ([PR #3229](https://github.com/ponylang/ponyc/pull/3229))
+- Fix segfault due to Cycle Detector viewref inconsistency ([PR #3254](https://github.com/ponylang/ponyc/pull/3254))
+
+### Changed
+
+- Make Map insertion functions total ([PR #3203](https://github.com/ponylang/ponyc/pull/3203))
+- Stop building Tumbleweed packages for releases ([PR #3228](https://github.com/ponylang/ponyc/pull/3228))
+- Stop creating Debian Buster releases ([PR #3227](https://github.com/ponylang/ponyc/pull/3227))
+- Remove `glob` package from standard library ([PR #3220](https://github.com/ponylang/ponyc/pull/3220))
+- Remove `regex` package from standard library ([PR #3218](https://github.com/ponylang/ponyc/pull/3218))
+- Remove `crypto` package from standard library ([PR #3225](https://github.com/ponylang/ponyc/pull/3225))
+- Remove `net/ssl` package from standard library ([PR #3225](https://github.com/ponylang/ponyc/pull/3225))
+
+## [0.29.0] - 2019-07-06
+
+### Fixed
+
+- Do not permit leading zeros in JSON numbers ([PR #3167](https://github.com/ponylang/ponyc/pull/3167))
+- Make reading via TCPConnection re-entrant safe ([PR #3175](https://github.com/ponylang/ponyc/pull/3175))
+- Cleanup TCPConnection GC-safety mechanism for writev buffers ([PR #3177](https://github.com/ponylang/ponyc/pull/3177))
+- Add SSL tests and fix some SSL related bugs ([PR #3174](https://github.com/ponylang/ponyc/pull/3174))
+- Fix lib/llvm to support MacOS ([PR #3181](https://github.com/ponylang/ponyc/pull/3181))
+- Close Denial of Service issue with TCPConnection.expect ([PR #3197](https://github.com/ponylang/ponyc/pull/3197))
+- Fix return type checking to allow aliasing for non-ephemeral return types. ([PR #3201](https://github.com/ponylang/ponyc/pull/3201))
+
+### Added
+
+- Allow use of OpenSSL 1.1.1 when building Pony ([PR #3156](https://github.com/ponylang/ponyc/pull/3156))
+- Add `pointer.offset` to get arbitrary pointer tags via offset ([PR #3177](https://github.com/ponylang/ponyc/pull/3177))
+- Add DTrace/SystemTap probes for muted & unmuted events ([PR #3196](https://github.com/ponylang/ponyc/pull/3196))
+- Add method to AsioEvent to see if an event is a oneshot ([PR #3198](https://github.com/ponylang/ponyc/pull/3198))
+
+### Changed
+
+- Do not permit leading zeros in JSON numbers ([PR #3167](https://github.com/ponylang/ponyc/pull/3167))
+- Make TCPConnection yield on writes to not hog cpu ([PR #3176](https://github.com/ponylang/ponyc/pull/3176))
+- Change how TCP connection reads data to improve performance ([PR #3178](https://github.com/ponylang/ponyc/pull/3178))
+- Allow use of runtime TCP connect without ASIO one shot ([PR #3171](https://github.com/ponylang/ponyc/pull/3171))
+- Simplify buffering in TCPConnection ([PR #3185](https://github.com/ponylang/ponyc/pull/3185))
+- Allow for fine-grained control of yielding CPU in TCPConnection ([PR #3197](https://github.com/ponylang/ponyc/pull/3187))
+- Make TCPConnection.expect partial ([PR #3197](https://github.com/ponylang/ponyc/pull/3197))
+
+## [0.28.1] - 2019-06-01
+
+### Fixed
+
+- Don't turn off Epoll OneShot when resubscribing to events  ([PR #3136](https://github.com/ponylang/ponyc/pull/3136))
+- Add unchop to array and unchop, repeat_str and mul to string ([PR #3155](https://github.com/ponylang/ponyc/pull/3155))
+- Fix cycle detector issue with checking for blocked actors ([PR #3154](https://github.com/ponylang/ponyc/pull/3154))
+- Wake up suspended scheduler threads if there is work for another one ([PR #3153](https://github.com/ponylang/ponyc/pull/3153))
+
+### Added
+
+- Add Docker image based on Alpine ([PR #3138](https://github.com/ponylang/ponyc/pull/3135))
+- Added `XorOshiro128StarStar` and `SplitMix64` PRNGs. ([PR #3135](https://github.com/ponylang/ponyc/pull/3135))
+- Added function `Random.int_unbiased`. ([PR #3135](https://github.com/ponylang/ponyc/pull/3135))
+- Added `from_u64` constructor to 128 bit state PRNGs. ([PR #3135](https://github.com/ponylang/ponyc/pull/3135))
+- Add unchop to array and unchop, repeat_str and mul to string ([PR #3155](https://github.com/ponylang/ponyc/pull/3155))
+
+### Changed
+
+- Updated `XorOshiro128Plus` parameters. This PRNG will now produce different values for the same seed as before. ([PR #3135](https://github.com/ponylang/ponyc/pull/3135))
+- Use fixed-point inversion for `Random.int` if the platform allows. ([PR #3135](https://github.com/ponylang/ponyc/pull/3135))
 
 ## [0.28.0] - 2019-03-22
 

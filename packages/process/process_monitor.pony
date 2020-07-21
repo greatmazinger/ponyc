@@ -56,32 +56,39 @@ class ProcessClient is ProcessNotify
     _env.out.print("STDERR: " + err)
 
   fun ref failed(process: ProcessMonitor ref, err: ProcessError) =>
-    match err
-    | ExecveError => _env.out.print("ProcessError: ExecveError")
-    | PipeError => _env.out.print("ProcessError: PipeError")
-    | ForkError => _env.out.print("ProcessError: ForkError")
-    | WaitpidError => _env.out.print("ProcessError: WaitpidError")
-    | WriteError => _env.out.print("ProcessError: WriteError")
-    | KillError => _env.out.print("ProcessError: KillError")
-    | CapError => _env.out.print("ProcessError: CapError")
-    | Unsupported => _env.out.print("ProcessError: Unsupported")
-    else _env.out.print("Unknown ProcessError!")
-    end
+    _env.out.print(err.string())
 
-  fun ref dispose(process: ProcessMonitor ref, child_exit_code: I32) =>
+  fun ref dispose(process: ProcessMonitor ref, child_exit_status: ProcessExitStatus) =>
     let code: I32 = consume child_exit_code
-    _env.out.print("Child exit code: " + code.string())
+    match child_exit_status
+    | let exited: Exited =>
+      _env.out.print("Child exit code: " + exited.exit_code().string())
+    | let signaled: Signaled =>
+      _env.out.print("Child terminated by signal: " + signaled.signal().string())
+    end
 ```
 
 ## Process portability
 
-The ProcessMonitor supports spawning processes on Linux, FreeBSD and OSX.
-Processes are not supported on Windows and attempting to use them will cause
-a runtime error.
+The ProcessMonitor supports spawning processes on Linux, FreeBSD, OSX and Windows.
 
 ## Shutting down ProcessMonitor and external process
 
-Document waitpid behaviour (stops world)
+When a process is spawned using ProcessMonitor, and it is not necessary to communicate to it any further
+using `stdin` and `stdout` or `stderr`, calling [done_writing()](process-ProcessMonitor.md#done_writing)
+will close stdin to the child process. Processes expecting input will be notified of an `EOF` on their `stdin`
+and can terminate.
+
+If a running program needs to be canceled and the [ProcessMonitor](process-ProcessMonitor.md) should be shut down,
+calling [dispose](process-ProcessMonitor.md#dispose) will terminate the child
+process and clean up all resources.
+
+Once the child process is detected to be closed, the process exit status is retrieved and
+[ProcessNotify.dispose](process-ProcessNotify.md#dispose) is called.
+
+The process exit status can be either an instance of [Exited](process-Exited.md) containing
+the process exit code in case the program exited on its own,
+or (only on posix systems like linux, osx or bsd) an instance of [Signaled](process-Signaled.md) containing the signal number that terminated the process.
 
 """
 use "backpressure"
@@ -89,25 +96,6 @@ use "collections"
 use "files"
 use "time"
 
-primitive ExecveError
-primitive PipeError
-primitive ForkError
-primitive WaitpidError
-primitive WriteError
-primitive KillError   // Not thrown at this time
-primitive Unsupported // we throw this on non POSIX systems
-primitive CapError
-
-type ProcessError is
-  ( ExecveError
-  | ForkError
-  | KillError
-  | PipeError
-  | Unsupported
-  | WaitpidError
-  | WriteError
-  | CapError
-  )
 
 type ProcessMonitorAuth is (AmbientAuth | StartProcessAuth)
 
@@ -122,6 +110,7 @@ actor ProcessMonitor
   var _stdin: _Pipe = _Pipe.none()
   var _stdout: _Pipe = _Pipe.none()
   var _stderr: _Pipe = _Pipe.none()
+  var _err: _Pipe = _Pipe.none()
   var _child: _Process = _ProcessNone
 
   let _max_size: USize = 4096
@@ -133,7 +122,8 @@ actor ProcessMonitor
   var _done_writing: Bool = false
 
   var _closed: Bool = false
-  var _timers: (Timers tag | None) = None  // For windows only
+  var _timers: (Timers tag | None) = None
+  let _process_poll_interval: U64
 
   new create(
     auth: ProcessMonitorAuth,
@@ -141,7 +131,9 @@ actor ProcessMonitor
     notifier: ProcessNotify iso,
     filepath: FilePath,
     args: Array[String] val,
-    vars: Array[String] val)
+    vars: Array[String] val,
+    wdir: (FilePath | None) = None,
+    process_poll_interval: U64 = Nanos.from_millis(100))
   =>
     """
     Create infrastructure to communicate with a forked child process and
@@ -150,11 +142,13 @@ actor ProcessMonitor
     """
     _backpressure_auth = backpressure_auth
     _notifier = consume notifier
+    _process_poll_interval = process_poll_interval
 
     // We need permission to execute and the
     // file itself needs to be an executable
     if not filepath.caps(FileExec) then
-      _notifier.failed(this, CapError)
+      _notifier.failed(this, ProcessError(CapError, filepath.path
+        + " is not an executable or we do not have execute capability."))
       return
     end
 
@@ -166,55 +160,85 @@ actor ProcessMonitor
     if not ok then
       // unable to stat the file path given so it may not exist
       // or may be a directory.
-      _notifier.failed(this, ExecveError)
+      _notifier.failed(this, ProcessError(ExecveError, filepath.path
+        + " does not exist or is a directory."))
       return
     end
 
     try
       _stdin = _Pipe.outgoing()?
+    else
+      _stdin.close()
+      _notifier.failed(this, ProcessError(PipeError,
+        "Failed to open pipe for stdin."))
+      return
+    end
+
+    try
       _stdout = _Pipe.incoming()?
+    else
+      _stdin.close()
+      _stdout.close()
+      _notifier.failed(this, ProcessError(PipeError,
+        "Failed to open pipe for stdout."))
+      return
+    end
+
+    try
       _stderr = _Pipe.incoming()?
     else
       _stdin.close()
       _stdout.close()
       _stderr.close()
-      _notifier.failed(this, PipeError)
+      _notifier.failed(this, ProcessError(PipeError,
+        "Failed to open pipe for stderr."))
+      return
+    end
+
+    try
+      _err = _Pipe.incoming()?
+    else
+      _stdin.close()
+      _stdout.close()
+      _stderr.close()
+      _err.close()
+      _notifier.failed(this, ProcessError(PipeError,
+        "Failed to open auxiliary error pipe."))
       return
     end
 
     try
       ifdef posix then
         _child = _ProcessPosix.create(
-          filepath.path, args, vars, _stdin, _stdout, _stderr)?
+          filepath.path, args, vars, wdir, _err, _stdin, _stdout, _stderr)?
       elseif windows then
-        _child = _ProcessWindows.create(
-          filepath.path, args, vars, _stdin, _stdout, _stderr)
+        let windows_child = _ProcessWindows.create(
+          filepath.path, args, vars, wdir, _stdin, _stdout, _stderr)
+        _child = windows_child
+        // notify about errors
+        match windows_child.processError
+        | let pe: ProcessError =>
+          _notifier.failed(this, pe)
+          return
+        end
       else
         compile_error "unsupported platform"
       end
+      _err.begin(this)
       _stdin.begin(this)
       _stdout.begin(this)
       _stderr.begin(this)
-
-      // Asio is not wired up for Windows, so use a timer for now.
-      ifdef windows then
-        let timers = Timers
-        let pm: ProcessMonitor tag = this
-        let tn =
-          object iso is TimerNotify
-            fun ref apply(timer: Timer, count: U64): Bool =>
-              pm.timer_notify()
-              true
-          end
-        let timer = Timer(consume tn, 50_000_000, 10_000_000)
-        timers(consume timer)
-        _timers = timers
-      end
     else
-      _notifier.failed(this, ForkError)
+      _notifier.failed(this, ProcessError(ForkError))
       return
     end
+
+    // Asio is not wired up for Windows, so use a timer for now.
+    ifdef windows then
+      _setup_windows_timers()
+    end
     _notifier.created(this)
+
 
   be print(data: ByteSeq) =>
     """
@@ -300,6 +324,12 @@ actor ProcessMonitor
       elseif AsioEvent.disposable(flags) then
         _stderr.dispose()
       end
+    | _err.event =>
+      if AsioEvent.readable(flags) then
+        _pending_reads(_err)
+      elseif AsioEvent.disposable(flags) then
+        _err.dispose()
+      end
     end
     _try_shutdown()
 
@@ -321,18 +351,58 @@ actor ProcessMonitor
       _stdin.close()
       _stdout.close()
       _stderr.close()
-      let exit_code = _child.wait()
-      if exit_code < 0 then
-        // An error waiting for pid
-        _notifier.failed(this, WaitpidError)
-      else
-        // process child exit code
-        _notifier.dispose(this, exit_code)
-      end
-      match _timers
-      | let t: Timers => t.dispose()
-      end
+      _wait_for_child()
     end
+
+  be _wait_for_child() =>
+    match _child.wait()
+    | _StillRunning =>
+      let timers = _ensure_timers()
+      let pm: ProcessMonitor tag = this
+      let tn =
+        object iso is TimerNotify
+          fun ref apply(timer: Timer, count: U64): Bool =>
+            pm._wait_for_child()
+            true
+        end
+      let timer = Timer(consume tn, _process_poll_interval, _process_poll_interval)
+      timers(consume timer)
+    | let exit_status: ProcessExitStatus =>
+      // process child exit code or termination signal
+      _notifier.dispose(this, exit_status)
+      _dispose_timers()
+    | let wpe: WaitpidError =>
+      _notifier.failed(this, ProcessError(WaitpidError))
+      _dispose_timers()
+    end
+
+  fun ref _ensure_timers(): Timers tag =>
+    match _timers
+    | None =>
+      let ts = Timers
+      _timers = ts
+      ts
+    | let ts: Timers => ts
+    end
+
+  fun ref _dispose_timers() =>
+    match _timers
+    | let ts: Timers =>
+      ts.dispose()
+      _timers = None
+    end
+
+  fun ref _setup_windows_timers() =>
+    let timers = _ensure_timers()
+    let pm: ProcessMonitor tag = this
+    let tn =
+      object iso is TimerNotify
+        fun ref apply(timer: Timer, count: U64): Bool =>
+          pm.timer_notify()
+          true
+      end
+    let timer = Timer(consume tn, 50_000_000, 10_000_000)
+    timers(consume timer)
 
   fun ref _try_shutdown() =>
     """
@@ -384,6 +454,16 @@ actor ProcessMonitor
         end
       | _stderr.near_fd =>
         _notifier.stderr(this, consume data)
+      | _err.near_fd =>
+        let step: U8 = try data.read_u8(0)? else -1 end
+        match step
+        | _StepChdir() =>
+          _notifier.failed(this, ProcessError(ChdirError))
+        | _StepExecve() =>
+          _notifier.failed(this, ProcessError(ExecveError))
+        else
+          _notifier.failed(this, ProcessError(UnknownError))
+        end
       end
 
       _read_len = 0
@@ -430,7 +510,7 @@ actor ProcessMonitor
           Backpressure.apply(_backpressure_auth)
         else
           // Notify caller of error, close fd and done.
-          _notifier.failed(this, WriteError)
+          _notifier.failed(this, ProcessError(WriteError))
           _stdin.close_near()
         end
       elseif len.usize() < data.size() then
@@ -465,7 +545,7 @@ actor ProcessMonitor
             return
           else
             // Close pipe and bail out.
-            _notifier.failed(this, WriteError)
+            _notifier.failed(this, ProcessError(WriteError))
             _stdin.close_near()
             return
           end
@@ -486,7 +566,7 @@ actor ProcessMonitor
         end
       else
         // handle error
-        _notifier.failed(this, WriteError)
+        _notifier.failed(this, ProcessError(WriteError))
         return
       end
     end

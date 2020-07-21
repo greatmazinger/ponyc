@@ -15,6 +15,9 @@
 #include <valgrind/helgrind.h>
 #endif
 
+// default actor batch size
+#define PONY_SCHED_BATCH 100
+
 // Ignore padding at the end of the type.
 pony_static_assert((offsetof(pony_actor_t, gc) + sizeof(gc_t)) ==
    sizeof(pony_actor_pad_t), "Wrong actor pad size!");
@@ -80,28 +83,44 @@ static bool well_formed_msg_chain(pony_msg_t* first, pony_msg_t* last)
 }
 #endif
 
-static void send_unblock(pony_ctx_t* ctx, pony_actor_t* actor)
+static void send_unblock(pony_actor_t* actor)
 {
   // Send unblock before continuing.
   unset_flag(actor, FLAG_BLOCKED | FLAG_BLOCKED_SENT);
-  ponyint_cycle_unblock(ctx, actor);
+  ponyint_cycle_unblock(actor);
 }
 
 static bool handle_message(pony_ctx_t* ctx, pony_actor_t* actor,
   pony_msg_t* msg)
 {
+#ifdef USE_MEMTRACK_MESSAGES
+  ctx->num_messages--;
+#endif
+
   switch(msg->id)
   {
     case ACTORMSG_ACQUIRE:
     {
+#ifdef USE_MEMTRACK_MESSAGES
+      ctx->mem_used_messages -= sizeof(pony_msgp_t);
+      ctx->mem_allocated_messages -= POOL_ALLOC_SIZE(pony_msgp_t);
+#endif
+
       pony_assert(!ponyint_is_cycle(actor));
       pony_msgp_t* m = (pony_msgp_t*)msg;
+
+#ifdef USE_MEMTRACK
+      ctx->mem_used_actors -= (sizeof(actorref_t)
+        + ponyint_objectmap_total_mem_size(&((actorref_t*)m->p)->map));
+      ctx->mem_allocated_actors -= (POOL_ALLOC_SIZE(actorref_t)
+        + ponyint_objectmap_total_alloc_size(&((actorref_t*)m->p)->map));
+#endif
 
       if(ponyint_gc_acquire(&actor->gc, (actorref_t*)m->p) &&
         has_flag(actor, FLAG_BLOCKED_SENT))
       {
         // send unblock if we've sent a block
-        send_unblock(ctx, actor);
+        send_unblock(actor);
       }
 
       return false;
@@ -109,14 +128,26 @@ static bool handle_message(pony_ctx_t* ctx, pony_actor_t* actor,
 
     case ACTORMSG_RELEASE:
     {
+#ifdef USE_MEMTRACK_MESSAGES
+      ctx->mem_used_messages -= sizeof(pony_msgp_t);
+      ctx->mem_allocated_messages -= POOL_ALLOC_SIZE(pony_msgp_t);
+#endif
+
       pony_assert(!ponyint_is_cycle(actor));
       pony_msgp_t* m = (pony_msgp_t*)msg;
+
+#ifdef USE_MEMTRACK
+      ctx->mem_used_actors -= (sizeof(actorref_t)
+        + ponyint_objectmap_total_mem_size(&((actorref_t*)m->p)->map));
+      ctx->mem_allocated_actors -= (POOL_ALLOC_SIZE(actorref_t)
+        + ponyint_objectmap_total_alloc_size(&((actorref_t*)m->p)->map));
+#endif
 
       if(ponyint_gc_release(&actor->gc, (actorref_t*)m->p) &&
         has_flag(actor, FLAG_BLOCKED_SENT))
       {
         // send unblock if we've sent a block
-        send_unblock(ctx, actor);
+        send_unblock(actor);
       }
 
       return false;
@@ -124,6 +155,11 @@ static bool handle_message(pony_ctx_t* ctx, pony_actor_t* actor,
 
     case ACTORMSG_ACK:
     {
+#ifdef USE_MEMTRACK_MESSAGES
+      ctx->mem_used_messages -= sizeof(pony_msgi_t);
+      ctx->mem_allocated_messages -= POOL_ALLOC_SIZE(pony_msgi_t);
+#endif
+
       pony_assert(ponyint_is_cycle(actor));
       DTRACE3(ACTOR_MSG_RUN, (uintptr_t)ctx->scheduler, (uintptr_t)actor, msg->id);
       actor->type->dispatch(ctx, actor, msg);
@@ -132,12 +168,17 @@ static bool handle_message(pony_ctx_t* ctx, pony_actor_t* actor,
 
     case ACTORMSG_CONF:
     {
+#ifdef USE_MEMTRACK_MESSAGES
+      ctx->mem_used_messages -= sizeof(pony_msgi_t);
+      ctx->mem_allocated_messages -= POOL_ALLOC_SIZE(pony_msgi_t);
+#endif
+
       pony_assert(!ponyint_is_cycle(actor));
       if(has_flag(actor, FLAG_BLOCKED_SENT))
       {
         // We've sent a block message, send confirm.
         pony_msgi_t* m = (pony_msgi_t*)msg;
-        ponyint_cycle_ack(ctx, m->i);
+        ponyint_cycle_ack(m->i);
       }
 
       return false;
@@ -145,12 +186,18 @@ static bool handle_message(pony_ctx_t* ctx, pony_actor_t* actor,
 
     case ACTORMSG_ISBLOCKED:
     {
+#ifdef USE_MEMTRACK_MESSAGES
+      ctx->mem_used_messages -= sizeof(pony_msg_t);
+      ctx->mem_allocated_messages -= POOL_ALLOC_SIZE(pony_msg_t);
+#endif
+
       pony_assert(!ponyint_is_cycle(actor));
       if(has_flag(actor, FLAG_BLOCKED) && !has_flag(actor, FLAG_BLOCKED_SENT))
       {
         // We're blocked, send block message.
         set_flag(actor, FLAG_BLOCKED_SENT);
-        ponyint_cycle_block(ctx, actor, &actor->gc);
+        pony_assert(ctx->current == actor);
+        ponyint_cycle_block(actor, &actor->gc);
       }
 
       return false;
@@ -158,6 +205,8 @@ static bool handle_message(pony_ctx_t* ctx, pony_actor_t* actor,
 
     case ACTORMSG_BLOCK:
     {
+      // memtrack messages tracked in cycle detector
+
       pony_assert(ponyint_is_cycle(actor));
       DTRACE3(ACTOR_MSG_RUN, (uintptr_t)ctx->scheduler, (uintptr_t)actor, msg->id);
       actor->type->dispatch(ctx, actor, msg);
@@ -166,6 +215,11 @@ static bool handle_message(pony_ctx_t* ctx, pony_actor_t* actor,
 
     case ACTORMSG_UNBLOCK:
     {
+#ifdef USE_MEMTRACK_MESSAGES
+      ctx->mem_used_messages -= sizeof(pony_msgp_t);
+      ctx->mem_allocated_messages -= POOL_ALLOC_SIZE(pony_msgp_t);
+#endif
+
       pony_assert(ponyint_is_cycle(actor));
       DTRACE3(ACTOR_MSG_RUN, (uintptr_t)ctx->scheduler, (uintptr_t)actor, msg->id);
       actor->type->dispatch(ctx, actor, msg);
@@ -174,6 +228,11 @@ static bool handle_message(pony_ctx_t* ctx, pony_actor_t* actor,
 
     case ACTORMSG_CREATED:
     {
+#ifdef USE_MEMTRACK_MESSAGES
+      ctx->mem_used_messages -= sizeof(pony_msgp_t);
+      ctx->mem_allocated_messages -= POOL_ALLOC_SIZE(pony_msgp_t);
+#endif
+
       pony_assert(ponyint_is_cycle(actor));
       DTRACE3(ACTOR_MSG_RUN, (uintptr_t)ctx->scheduler, (uintptr_t)actor, msg->id);
       actor->type->dispatch(ctx, actor, msg);
@@ -182,6 +241,11 @@ static bool handle_message(pony_ctx_t* ctx, pony_actor_t* actor,
 
     case ACTORMSG_DESTROYED:
     {
+#ifdef USE_MEMTRACK_MESSAGES
+      ctx->mem_used_messages -= sizeof(pony_msgp_t);
+      ctx->mem_allocated_messages -= POOL_ALLOC_SIZE(pony_msgp_t);
+#endif
+
       pony_assert(ponyint_is_cycle(actor));
       DTRACE3(ACTOR_MSG_RUN, (uintptr_t)ctx->scheduler, (uintptr_t)actor, msg->id);
       actor->type->dispatch(ctx, actor, msg);
@@ -190,6 +254,11 @@ static bool handle_message(pony_ctx_t* ctx, pony_actor_t* actor,
 
     case ACTORMSG_CHECKBLOCKED:
     {
+#ifdef USE_MEMTRACK_MESSAGES
+      ctx->mem_used_messages -= sizeof(pony_msg_t);
+      ctx->mem_allocated_messages -= POOL_ALLOC_SIZE(pony_msg_t);
+#endif
+
       pony_assert(ponyint_is_cycle(actor));
       DTRACE3(ACTOR_MSG_RUN, (uintptr_t)ctx->scheduler, (uintptr_t)actor, msg->id);
       actor->type->dispatch(ctx, actor, msg);
@@ -198,11 +267,16 @@ static bool handle_message(pony_ctx_t* ctx, pony_actor_t* actor,
 
     default:
     {
+#ifdef USE_MEMTRACK_MESSAGES
+      ctx->mem_used_messages -= POOL_SIZE(msg->index);
+      ctx->mem_allocated_messages -= POOL_SIZE(msg->index);
+#endif
+
       pony_assert(!ponyint_is_cycle(actor));
       if(has_flag(actor, FLAG_BLOCKED_SENT))
       {
         // send unblock if we've sent a block
-        send_unblock(ctx, actor);
+        send_unblock(actor);
       }
 
       DTRACE3(ACTOR_MSG_RUN, (uintptr_t)ctx->scheduler, (uintptr_t)actor, msg->id);
@@ -230,34 +304,58 @@ static void try_gc(pony_ctx_t* ctx, pony_actor_t* actor)
   DTRACE1(GC_END, (uintptr_t)ctx->scheduler);
 }
 
-bool ponyint_actor_run(pony_ctx_t* ctx, pony_actor_t* actor, size_t batch)
+// return true if mute occurs
+static bool maybe_mute(pony_actor_t* actor)
+{
+  // if we become muted as a result of handling a message, bail out now.
+  // we aren't set to "muted" at this point. setting to muted during a
+  // a behavior can lead to race conditions that might result in a
+  // deadlock.
+  // Given that actor's are not run when they are muted, then when we
+  // started out batch, actor->muted would have been 0. If any of our
+  // message sends would result in the actor being muted, that value will
+  // have changed to greater than 0.
+  //
+  // We will then set the actor to "muted". Once set, any actor sending
+  // a message to it will be also be muted unless said sender is marked
+  // as overloaded.
+  //
+  // The key points here is that:
+  //   1. We can't set the actor to "muted" until after its finished running
+  //   a behavior.
+  //   2. We should bail out from running the actor and return false so that
+  //   it won't be rescheduled.
+  if(atomic_load_explicit(&actor->muted, memory_order_acquire) > 0)
+  {
+    ponyint_mute_actor(actor);
+    return true;
+  }
+
+  return false;
+}
+
+static bool batch_limit_reached(pony_actor_t* actor, bool polling)
+{
+  if(!has_flag(actor, FLAG_OVERLOADED) && !polling)
+  {
+    // If we hit our batch size, consider this actor to be overloaded
+    // only if we're not polling from C code.
+    // Overloaded actors are allowed to send to other overloaded actors
+    // and to muted actors without being muted themselves.
+    ponyint_actor_setoverloaded(actor);
+  }
+
+  return !has_flag(actor, FLAG_UNSCHEDULED);
+}
+
+bool ponyint_actor_run(pony_ctx_t* ctx, pony_actor_t* actor, bool polling)
 {
   pony_assert(!ponyint_is_muted(actor));
   ctx->current = actor;
+  size_t batch = PONY_SCHED_BATCH;
 
   pony_msg_t* msg;
   size_t app = 0;
-
-#ifdef USE_ACTOR_CONTINUATIONS
-  while(actor->continuation != NULL)
-  {
-    msg = actor->continuation;
-    actor->continuation = atomic_load_explicit(&msg->next,
-      memory_order_relaxed);
-    bool ret = handle_message(ctx, actor, msg);
-    ponyint_pool_free(msg->index, msg);
-
-    if(ret)
-    {
-      // If we handle an application message, try to gc.
-      app++;
-      try_gc(ctx, actor);
-
-      if(app == batch)
-        return !has_flag(actor, FLAG_UNSCHEDULED);
-    }
-  }
-#endif
 
   // If we have been scheduled, the head will not be marked as empty.
   pony_msg_t* head = atomic_load_explicit(&actor->q.head, memory_order_relaxed);
@@ -274,42 +372,14 @@ bool ponyint_actor_run(pony_ctx_t* ctx, pony_actor_t* actor, size_t batch)
       app++;
       try_gc(ctx, actor);
 
-      // if we become muted as a result of handling a message, bail out now.
-      // we aren't set to "muted" at this point. setting to muted during a
-      // a behavior can lead to race conditions that might result in a
-      // deadlock.
-      // Given that actor's are not run when they are muted, then when we
-      // started out batch, actor->muted would have been 0. If any of our
-      // message sends would result in the actor being muted, that value will
-      // have changed to greater than 0.
-      //
-      // We will then set the actor to "muted". Once set, any actor sending
-      // a message to it will be also be muted unless said sender is marked
-      // as overloaded.
-      //
-      // The key points here is that:
-      //   1. We can't set the actor to "muted" until after its finished running
-      //   a behavior.
-      //   2. We should bail out from running the actor and return false so that
-      //   it won't be rescheduled.
-      if(atomic_load_explicit(&actor->muted, memory_order_relaxed) > 0)
-      {
-        ponyint_mute_actor(actor);
+      // maybe mute actor; returns true if mute occurs
+      if(maybe_mute(actor))
         return false;
-      }
 
-      if(app == batch)
-      {
-        if(!has_flag(actor, FLAG_OVERLOADED))
-        {
-          // If we hit our batch size, consider this actor to be overloaded.
-          // Overloaded actors are allowed to send to other overloaded actors
-          // and to muted actors without being muted themselves.
-          ponyint_actor_setoverloaded(actor);
-        }
-
-        return !has_flag(actor, FLAG_UNSCHEDULED);
-      }
+      // if we've reached our batch limit
+      // or if we're polling where we want to stop after one app message
+      if(app == batch || polling)
+        return batch_limit_reached(actor, polling);
     }
 
     // Stop handling a batch if we reach the head we found when we were
@@ -393,6 +463,12 @@ void ponyint_actor_destroy(pony_actor_t* actor)
   ponyint_gc_destroy(&actor->gc);
   ponyint_heap_destroy(&actor->heap);
 
+#ifdef USE_MEMTRACK
+  pony_ctx_t* ctx = pony_ctx();
+  ctx->mem_used_actors -= actor->type->size;
+  ctx->mem_allocated_actors -= ponyint_pool_used_size(actor->type->size);
+#endif
+
   // Free variable sized actors correctly.
   ponyint_pool_free_size(actor->type->size, actor);
 }
@@ -469,6 +545,11 @@ PONY_API pony_actor_t* pony_create(pony_ctx_t* ctx, pony_type_t* type)
   memset(actor, 0, type->size);
   actor->type = type;
 
+#ifdef USE_MEMTRACK
+  ctx->mem_used_actors += type->size;
+  ctx->mem_allocated_actors += ponyint_pool_used_size(type->size);
+#endif
+
   ponyint_messageq_init(&actor->q);
   ponyint_heap_init(&actor->heap);
   ponyint_gc_done(&actor->gc);
@@ -488,7 +569,7 @@ PONY_API pony_actor_t* pony_create(pony_ctx_t* ctx, pony_type_t* type)
 
   // tell the cycle detector we exist if block messages are enabled
   if(!actor_noblock)
-    ponyint_cycle_actor_created(ctx, actor);
+    ponyint_cycle_actor_created(actor);
 
   DTRACE2(ACTOR_ALLOC, (uintptr_t)ctx->scheduler, (uintptr_t)actor);
   return actor;
@@ -496,11 +577,12 @@ PONY_API pony_actor_t* pony_create(pony_ctx_t* ctx, pony_type_t* type)
 
 PONY_API void ponyint_destroy(pony_ctx_t* ctx, pony_actor_t* actor)
 {
+  (void)ctx;
   // This destroys an actor immediately.
   // The finaliser is not called.
 
   // Notify cycle detector of actor being destroyed
-  ponyint_cycle_actor_destroyed(ctx, actor);
+  ponyint_cycle_actor_destroyed(actor);
 
   ponyint_actor_setpendingdestroy(actor);
   ponyint_actor_destroy(actor);
@@ -508,6 +590,13 @@ PONY_API void ponyint_destroy(pony_ctx_t* ctx, pony_actor_t* actor)
 
 PONY_API pony_msg_t* pony_alloc_msg(uint32_t index, uint32_t id)
 {
+#ifdef USE_MEMTRACK_MESSAGES
+  pony_ctx_t* ctx = pony_ctx();
+  ctx->mem_used_messages += POOL_SIZE(index);
+  ctx->mem_allocated_messages += POOL_SIZE(index);
+  ctx->num_messages++;
+#endif
+
   pony_msg_t* msg = (pony_msg_t*)ponyint_pool_alloc(index);
   msg->index = index;
   msg->id = id;
@@ -631,6 +720,11 @@ PONY_API void pony_chain(pony_msg_t* prev, pony_msg_t* next)
 
 PONY_API void pony_send(pony_ctx_t* ctx, pony_actor_t* to, uint32_t id)
 {
+#ifdef USE_MEMTRACK_MESSAGES
+  ctx->mem_used_messages += sizeof(pony_msg_t);
+  ctx->mem_used_messages -= POOL_ALLOC_SIZE(pony_msg_t);
+#endif
+
   pony_msg_t* m = pony_alloc_msg(POOL_INDEX(sizeof(pony_msg_t)), id);
   pony_sendv(ctx, to, m, m, id <= ACTORMSG_APPLICATION_START);
 }
@@ -638,6 +732,11 @@ PONY_API void pony_send(pony_ctx_t* ctx, pony_actor_t* to, uint32_t id)
 PONY_API void pony_sendp(pony_ctx_t* ctx, pony_actor_t* to, uint32_t id,
   void* p)
 {
+#ifdef USE_MEMTRACK_MESSAGES
+  ctx->mem_used_messages += sizeof(pony_msgp_t);
+  ctx->mem_used_messages -= POOL_ALLOC_SIZE(pony_msgp_t);
+#endif
+
   pony_msgp_t* m = (pony_msgp_t*)pony_alloc_msg(
     POOL_INDEX(sizeof(pony_msgp_t)), id);
   m->p = p;
@@ -648,22 +747,17 @@ PONY_API void pony_sendp(pony_ctx_t* ctx, pony_actor_t* to, uint32_t id,
 PONY_API void pony_sendi(pony_ctx_t* ctx, pony_actor_t* to, uint32_t id,
   intptr_t i)
 {
+#ifdef USE_MEMTRACK_MESSAGES
+  ctx->mem_used_messages += sizeof(pony_msgi_t);
+  ctx->mem_used_messages -= POOL_ALLOC_SIZE(pony_msgi_t);
+#endif
+
   pony_msgi_t* m = (pony_msgi_t*)pony_alloc_msg(
     POOL_INDEX(sizeof(pony_msgi_t)), id);
   m->i = i;
 
   pony_sendv(ctx, to, &m->msg, &m->msg, id <= ACTORMSG_APPLICATION_START);
 }
-
-#ifdef USE_ACTOR_CONTINUATIONS
-PONY_API void pony_continuation(pony_ctx_t* ctx, pony_msg_t* m)
-{
-  pony_assert(ctx->current != NULL);
-  pony_actor_t* self = ctx->current;
-  atomic_store_explicit(&m->next, self->continuation, memory_order_relaxed);
-  self->continuation = m;
-}
-#endif
 
 PONY_API void* pony_alloc(pony_ctx_t* ctx, size_t size)
 {
@@ -740,11 +834,13 @@ PONY_API void pony_schedule(pony_ctx_t* ctx, pony_actor_t* actor)
 
 PONY_API void pony_unschedule(pony_ctx_t* ctx, pony_actor_t* actor)
 {
+  (void)ctx;
+
   if(has_flag(actor, FLAG_BLOCKED_SENT))
   {
     // send unblock if we've sent a block
     if(!actor_noblock)
-      send_unblock(ctx, actor);
+      send_unblock(actor);
   }
 
   set_flag(actor, FLAG_UNSCHEDULED);
@@ -757,8 +853,10 @@ PONY_API void pony_become(pony_ctx_t* ctx, pony_actor_t* actor)
 
 PONY_API void pony_poll(pony_ctx_t* ctx)
 {
+  // TODO: this seems like it could allow muted actors to get `ponyint_actor_run`
+  // which shouldn't be allowed. Fixing might require API changes.
   pony_assert(ctx->current != NULL);
-  ponyint_actor_run(ctx, ctx->current, 1);
+  ponyint_actor_run(ctx, ctx->current, true);
 }
 
 void ponyint_actor_setoverloaded(pony_actor_t* actor)
@@ -832,29 +930,78 @@ bool ponyint_triggers_muting(pony_actor_t* actor)
 // We have far more relaxed usage of atomics in `ponyint_mute_actor` given the
 // far more relaxed rule #2.
 //
-// An actor's `is_muted` field is effectly a `bool` value. However, by using a
-// `uint8_t`, we use the same amount of space that we would for a boolean but
-// can use more efficient atomic operations. Given how often these methods are
-// called (at least once per message send), efficiency is of primary
-// importance.
+// An actor's `is_muted` field is effectively a `bool` value. However, by
+// using a `uint8_t`, we use the same amount of space that we would for a
+// boolean but can use more efficient atomic operations. Given how often
+// these methods are called (at least once per message send), efficiency is
+// of primary importance.
 
 bool ponyint_is_muted(pony_actor_t* actor)
 {
-  return (atomic_fetch_add_explicit(&actor->is_muted, 0, memory_order_relaxed) > 0);
+  return (atomic_load_explicit(&actor->is_muted, memory_order_acquire) > 0);
 }
 
 void ponyint_mute_actor(pony_actor_t* actor)
 {
-   uint8_t is_muted = atomic_load_explicit(&actor->is_muted, memory_order_relaxed);
+   uint8_t is_muted = atomic_fetch_add_explicit(&actor->is_muted, 1, memory_order_acq_rel);
    pony_assert(is_muted == 0);
-   is_muted++;
-   atomic_store_explicit(&actor->is_muted, is_muted, memory_order_relaxed);
-
+   DTRACE1(ACTOR_MUTED, (uintptr_t)actor);
+   (void)is_muted;
 }
 
 void ponyint_unmute_actor(pony_actor_t* actor)
 {
-  uint8_t is_muted = atomic_fetch_sub_explicit(&actor->is_muted, 1, memory_order_relaxed);
+  uint8_t is_muted = atomic_fetch_sub_explicit(&actor->is_muted, 1, memory_order_acq_rel);
   pony_assert(is_muted == 1);
+  DTRACE1(ACTOR_UNMUTED, (uintptr_t)actor);
   (void)is_muted;
 }
+
+#ifdef USE_MEMTRACK
+size_t ponyint_actor_mem_size(pony_actor_t* actor)
+{
+  return actor->type->size;
+}
+
+size_t ponyint_actor_alloc_size(pony_actor_t* actor)
+{
+  return ponyint_pool_used_size(actor->type->size);
+}
+
+size_t ponyint_actor_total_mem_size(pony_actor_t* actor)
+{
+  // memeory categories:
+  //   used - memory allocated that is actively being used by the runtime
+  return
+      // actor struct size (maybe this shouldn't be counted to avoid double
+      // counting since it is counted as part of the scheduler thread mem used?)
+      actor->type->size
+      // cycle detector memory used (or 0 if not cycle detector)
+    + ( ponyint_is_cycle(actor) ? ponyint_cycle_mem_size(actor) : 0)
+      // actor heap memory used
+    + ponyint_heap_mem_size(&actor->heap)
+      // actor gc total memory used
+    + ponyint_gc_total_mem_size(&actor->gc)
+      // size of stub message when message_q is initialized
+    + sizeof(pony_msg_t);
+}
+
+size_t ponyint_actor_total_alloc_size(pony_actor_t* actor)
+{
+  // memeory categories:
+  //   alloc - memory allocated whether it is actively being used or not
+  return
+      // allocation for actor struct size (maybe this shouldn't be counted to
+      // avoid double counting since it is counted as part of the scheduler
+      // thread mem allocated?)
+      ponyint_pool_used_size(actor->type->size)
+      // cycle detector memory allocated (or 0 if not cycle detector)
+    + ( ponyint_is_cycle(actor) ? ponyint_cycle_alloc_size(actor) : 0)
+      // actor heap memory allocated
+    + ponyint_heap_alloc_size(&actor->heap)
+      // actor gc total memory allocated
+    + ponyint_gc_total_alloc_size(&actor->gc)
+      // allocation of stub message when message_q is initialized
+    + POOL_ALLOC_SIZE(pony_msg_t);
+}
+#endif

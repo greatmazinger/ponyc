@@ -91,7 +91,7 @@ class _TestObjectLogging is _LoggerTest[U64]
     logger'(Error) and logger'.log(U64(42))
 
 primitive _TestFormatter is LogFormatter
-  fun apply(msg: String, loc: SourceLoc): String =>
+  fun apply(lvl: LogLevel, msg: String, loc: SourceLoc): String =>
     msg + "\n"
 
 actor _TestStream is OutStream
@@ -118,6 +118,8 @@ actor _TestStream is OutStream
     for bytes in data.values() do
       _collect(bytes)
     end
+
+  be flush() => None
 
   fun ref _collect(data: ByteSeq) =>
     _output.append(data)

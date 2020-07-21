@@ -219,6 +219,7 @@ PONY_API void pony_serialise(pony_ctx_t* ctx, void* p, pony_type_t* t,
   out->size = ctx->serialise_size;
   out->alloc = out->size;
   out->ptr = (char*)alloc_fn(ctx, out->size);
+  memset(out->ptr, 0, out->size);
 
   size_t i = HASHMAP_BEGIN;
   serialise_t* s;
@@ -235,8 +236,8 @@ PONY_API void pony_serialise(pony_ctx_t* ctx, void* p, pony_type_t* t,
 PONY_API void* pony_deserialise_offset(pony_ctx_t* ctx, pony_type_t* t,
   uintptr_t offset)
 {
-  // if all the bits of the offset are set, it is either a Pointer[A] a or a
-  // MaybePointer[A].
+  // if all the bits of the offset are set, it is either a Pointer[A] or a
+  // NullablePointer[A].
   if(offset == ALL_BITS)
     return NULL;
 

@@ -546,7 +546,7 @@ PONY_API void pony_os_std_write(FILE* fp, char* buffer, size_t len)
       if(pos > last)
       {
         // Write any pending data.
-        fwrite(&buffer[last], pos - last, 1, fp);
+        _fwrite_nolock(&buffer[last], pos - last, 1, fp);
         last = pos;
       }
 
@@ -752,6 +752,21 @@ PONY_API void pony_os_std_write(FILE* fp, char* buffer, size_t len)
   fwrite_unlocked(buffer, len, 1, fp);
 #else
   fwrite(buffer, len, 1, fp);
+#endif
+}
+
+PONY_API void pony_os_std_flush(FILE* fp)
+{
+  // avoid flushing all streams
+  if(fp == NULL)
+    return;
+
+#ifdef PLATFORM_IS_WINDOWS
+  _fflush_nolock(fp);
+#elif defined PLATFORM_IS_LINUX
+  fflush_unlocked(fp);
+#else
+  fflush(fp);
 #endif
 }
 

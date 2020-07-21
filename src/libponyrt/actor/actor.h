@@ -33,11 +33,8 @@ typedef struct pony_actor_t
 {
   pony_type_t* type;
   messageq_t q;
-#ifdef USE_ACTOR_CONTINUATIONS
-  pony_msg_t* continuation;
-#endif
+  PONY_ATOMIC(size_t) muted;
   PONY_ATOMIC(uint8_t) flags;
-  PONY_ATOMIC(uint64_t) muted;
   PONY_ATOMIC(uint8_t) is_muted;
 
   // keep things accessed by other actors on a separate cache line
@@ -59,7 +56,7 @@ enum
 
 bool has_flag(pony_actor_t* actor, uint8_t flag);
 
-bool ponyint_actor_run(pony_ctx_t* ctx, pony_actor_t* actor, size_t batch);
+bool ponyint_actor_run(pony_ctx_t* ctx, pony_actor_t* actor, bool polling);
 
 void ponyint_actor_destroy(pony_actor_t* actor);
 
@@ -100,6 +97,16 @@ void ponyint_unmute_actor(pony_actor_t* actor);
 void ponyint_mute_actor(pony_actor_t* actor);
 
 PONY_API void ponyint_destroy(pony_ctx_t* ctx, pony_actor_t* actor);
+
+#ifdef USE_MEMTRACK
+size_t ponyint_actor_mem_size(pony_actor_t* actor);
+
+size_t ponyint_actor_alloc_size(pony_actor_t* actor);
+
+size_t ponyint_actor_total_mem_size(pony_actor_t* actor);
+
+size_t ponyint_actor_total_alloc_size(pony_actor_t* actor);
+#endif
 
 PONY_EXTERN_C_END
 

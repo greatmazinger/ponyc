@@ -644,6 +644,18 @@ TEST_F(SugarTest, IfWithElse)
 }
 
 
+TEST_F(SugarTest, NotIf)
+{
+  const char* short_form =
+    "class Foo\n"
+    "  fun f() =>\n"
+    "    let a = true\n"
+    "    if not if a then not a else a end then a end";
+
+  TEST_COMPILE(short_form);
+}
+
+
 TEST_F(SugarTest, WhileWithoutElse)
 {
   const char* short_form =
@@ -670,6 +682,18 @@ TEST_F(SugarTest, WhileWithElse)
     "  var create: U32\n"
     "  fun f(): U32 val =>\n"
     "    while 1 do 2 else 3 end";
+
+  TEST_COMPILE(short_form);
+}
+
+
+TEST_F(SugarTest, NotWhileWithElse)
+{
+  const char* short_form =
+    "class Foo\n"
+    "  fun f(): U32 val =>\n"
+    "    let a = true\n"
+    "    not while a do true else false end";
 
   TEST_COMPILE(short_form);
 }
@@ -803,6 +827,17 @@ TEST_F(SugarTest, ForWithElse)
     "  )";
 
   TEST_EQUIV(short_form, full_form);
+}
+
+
+TEST_F(SugarTest, NotForWithElse)
+{
+  const char* short_form =
+    "class Foo\n"
+    "  fun f()=>\n"
+    "    not for i in 1 do true else false end";
+
+  TEST_COMPILE(short_form);
 }
 
 
@@ -1898,3 +1933,141 @@ TEST_F(SugarTest, AsOperatorWithLambdaType)
 
   TEST_COMPILE(short_form);
 }
+
+TEST_F(SugarTest, WithExpr)
+{
+  const char* short_form =
+    "class Disposable\n"
+    "  var create: U32\n"
+    "  fun dispose(): None =>\n"
+    "    None"
+    "\n"
+    "class Foo\n"
+    "  var create: U32\n"
+    "  fun do_it() =>\n"
+    "    with a = Disposable, b = Disposable do\n"
+    "      error\n"
+    "    end\n";
+  const char* full_form =
+    "use \"builtin\"\n"
+    "class ref Disposable\n"
+    "  var create: U32\n"
+    "  \n"
+    "  fun box dispose(): None =>\n"
+    "    None\n"
+    "    None\n"
+    "\n"
+    "class ref Foo\n"
+    "  var create: U32\n"
+    "  fun box do_it(): None =>\n"
+    "    (\n"
+    "    let $1 = (Disposable)\n"
+    "    let $0 = (Disposable)\n"
+    "    $try_no_check\n"
+    "      let b = $1\n"
+    "      let a = $0\n"
+    "      (error)\n"
+    "    else\n"
+    "      let b = $1\n"
+    "      let a = $0\n"
+    "      (None)\n"
+    "    then\n"
+    "      let b = $1\n"
+    "      b.dispose()\n"
+    "      let a = $0\n"
+    "      a.dispose()\n"
+    "    end)\n"
+    "    None";
+  TEST_EQUIV(short_form, full_form);
+}
+
+TEST_F(SugarTest, WithExprWithTupleDestructuring)
+{
+  const char* short_form =
+    "class Disposable\n"
+    "  var create: U32\n"
+    "  fun dispose(): None =>\n"
+    "    None"
+    "\n"
+    "class Foo\n"
+    "  var create: U32\n"
+    "  fun do_it() =>\n"
+    "    with (a, b) = (Disposable, Disposable) do\n"
+    "      error\n"
+    "    end\n";
+  const char* full_form =
+    "use \"builtin\"\n"
+    "class ref Disposable\n"
+    "  var create: U32\n"
+    "  \n"
+    "  fun box dispose(): None =>\n"
+    "    None\n"
+    "    None\n"
+    "\n"
+    "class ref Foo\n"
+    "  var create: U32\n"
+    "  fun box do_it(): None =>\n"
+    "    (\n"
+    "    let $0 = (\n"
+    "      (Disposable, Disposable)\n"
+    "    )\n"
+    "    $try_no_check\n"
+    "      (let a, let b) = $0\n"
+    "      (error)\n"
+    "    else\n"
+    "      (let a, let b) = $0\n"
+    "      (None)\n"
+    "    then\n"
+    "      (let a, let b) = $0\n"
+    "      b.dispose()\n"
+    "      a.dispose()\n"
+    "    end)\n"
+    "    None";
+  TEST_EQUIV(short_form, full_form);
+}
+
+TEST_F(SugarTest, WithExprWithTupleDestructuringAndDontCare)
+{
+  const char* short_form =
+    "class Disposable\n"
+    "  var create: U32\n"
+    "  fun dispose(): None =>\n"
+    "    None"
+    "\n"
+    "class Foo\n"
+    "  var create: U32\n"
+    "  fun do_it() =>\n"
+    "    with (a, _, c) = (Disposable, Disposable, Disposable) do\n"
+    "      error\n"
+    "    end\n";
+  const char* full_form =
+    "use \"builtin\"\n"
+    "class ref Disposable\n"
+    "  var create: U32\n"
+    "  \n"
+    "  fun box dispose(): None =>\n"
+    "    None\n"
+    "    None\n"
+    "\n"
+    "class ref Foo\n"
+    "  var create: U32\n"
+    "  fun box do_it(): None =>\n"
+    "    (\n"
+    "    let $0 = (\n"
+    "      (Disposable, Disposable, Disposable)\n"
+    "    )\n"
+    "    $try_no_check\n"
+    "      (let a, let _, let c) = $0\n"
+    "      (error)\n"
+    "    else\n"
+    "      (let a, let _, let c) = $0\n"
+    "      (None)\n"
+    "    then\n"
+    "      (let a, let _, let c) = $0\n"
+    "      c.dispose()\n"
+    "      a.dispose()\n"
+    "    end)\n"
+    "    None";
+  TEST_EQUIV(short_form, full_form);
+}
+

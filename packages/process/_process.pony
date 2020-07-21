@@ -1,5 +1,22 @@
 use "signals"
+use "files"
 use @pony_os_errno[I32]()
+
+// for Windows System Error Codes see: https://docs.microsoft.com/de-de/windows/desktop/Debug/system-error-codes
+primitive _ERRORBADEXEFORMAT
+  fun apply(): U32 =>
+    """
+    ERROR_BAD_EXE_FORMAT
+    %1 is not a valid Win32 application.
+    """
+    193 // 0xC1
+
+primitive _ERRORDIRECTORY
+  fun apply(): U32 =>
+    """
+    The directory name is invalid.
+    """
+    267 // 0x10B
 
 primitive _STDINFILENO
   fun apply(): U32 => 0
@@ -34,13 +51,111 @@ primitive _EAGAIN
 primitive _EINVAL
   fun apply(): I32 => 22
 
+primitive _EXOSERR
+  fun apply(): I32 => 71
+
+// For handling errors between @fork and @execve
+primitive _StepChdir
+  fun apply(): U8 => 1
+
+primitive _StepExecve
+  fun apply(): U8 => 2
+
+primitive _WNOHANG
+  fun apply(): I32 =>
+    ifdef posix then
+      @ponyint_wnohang[I32]()
+    else
+      compile_error "no clue what WNOHANG is on this platform."
+    end
+
+class val Exited is (Stringable & Equatable[ProcessExitStatus])
+  """
+  Process exit status: Process exited with an exit code.
+  """
+  let _exit_code: I32
+
+  new val create(code: I32) =>
+    _exit_code = code
+
+  fun exit_code(): I32 =>
+    """
+    Retrieve the exit code of the exited process.
+    """
+    _exit_code
+
+  fun string(): String iso^ =>
+    recover iso
+      String(10)
+        .>append("Exited(")
+        .>append(_exit_code.string())
+        .>append(")")
+    end
+
+  fun eq(other: ProcessExitStatus): Bool =>
+    match other
+    | let e: Exited =>
+      e._exit_code == _exit_code
+    else
+      false
+    end
+
+class val Signaled is (Stringable & Equatable[ProcessExitStatus])
+  """
+  Process exit status: Process was terminated by a signal.
+  """
+  let _signal: U32
+
+  new val create(sig: U32) =>
+    _signal = sig
+
+  fun signal(): U32 =>
+    """
+    Retrieve the signal number that exited the process.
+    """
+    _signal
+
+  fun string(): String iso^ =>
+    recover iso
+      String(12)
+        .>append("Signaled(")
+        .>append(_signal.string())
+        .>append(")")
+    end
+
+  fun eq(other: ProcessExitStatus): Bool =>
+    match other
+    | let s: Signaled =>
+      s._signal == _signal
+    else
+      false
+    end
+
+
+type ProcessExitStatus is (Exited | Signaled)
+  """
+  Representing possible exit states of processes.
+  A process either exited with an exit code or, only on posix systems,
+  has been terminated by a signal.
+  """
+
+primitive _StillRunning
+
+type _WaitResult is (ProcessExitStatus | WaitpidError | _StillRunning)
+
+
 interface _Process
   fun kill()
-  fun ref wait(): I32
+  fun ref wait(): _WaitResult
+    """
+    Only polls, does not actually wait for the process to finish,
+    in order to not block a scheduler thread.
+    """
+
 
 class _ProcessNone is _Process
   fun kill() => None
-  fun ref wait(): I32 => 0
+  fun ref wait(): _WaitResult => Exited(0)
 
 class _ProcessPosix is _Process
   let pid: I32
@@ -49,6 +164,8 @@ class _ProcessPosix is _Process
     path: String,
     args: Array[String] val,
     vars: Array[String] val,
+    wdir: (FilePath | None),
+    err: _Pipe,
     stdin: _Pipe,
     stdout: _Pipe,
     stderr: _Pipe) ?
@@ -61,7 +178,7 @@ class _ProcessPosix is _Process
     pid = @fork[I32]()
     match pid
     | -1 => error
-    | 0 => _child_fork(path, argp, envp, stdin, stdout, stderr)
+    | 0 => _child_fork(path, argp, envp, wdir, err, stdin, stdout, stderr)
     end
 
   fun tag _make_argv(args: Array[String] box): Array[Pointer[U8] tag] =>
@@ -80,7 +197,8 @@ class _ProcessPosix is _Process
     path: String,
     argp: Array[Pointer[U8] tag],
     envp: Array[Pointer[U8] tag],
-    stdin: _Pipe, stdout: _Pipe, stderr: _Pipe)
+    wdir: (FilePath | None),
+    err: _Pipe, stdin: _Pipe, stdout: _Pipe, stderr: _Pipe)
   =>
     """
     We are now in the child process. We redirect STDIN, STDOUT and STDERR
@@ -93,10 +211,25 @@ class _ProcessPosix is _Process
     _dup2(stdin.far_fd, _STDINFILENO())   // redirect stdin
     _dup2(stdout.far_fd, _STDOUTFILENO()) // redirect stdout
     _dup2(stderr.far_fd, _STDERRFILENO()) // redirect stderr
+
+    var step: U8 = _StepChdir()
+
+    match wdir
+    | let d: FilePath =>
+      let dir: Pointer[U8] tag = d.path.cstring()
+      if 0 > @chdir[I32](dir) then
+        @write[ISize](err.far_fd, addressof step, USize(1))
+        @_exit[None](_EXOSERR())
+      end
+    | None => None
+    end
+
+    step = _StepExecve()
     if 0 > @execve[I32](path.cstring(), argp.cpointer(),
       envp.cpointer())
     then
-      @_exit[None](I32(-1))
+      @write[ISize](err.far_fd, addressof step, USize(1))
+      @_exit[None](_EXOSERR())
     end
 
   fun tag _dup2(oldfd: U32, newfd: U32) =>
@@ -132,37 +265,114 @@ class _ProcessPosix is _Process
       end
     end
 
-  fun ref wait(): I32 =>
+  fun ref wait(): _WaitResult =>
+    """Only polls, does not block."""
     if pid > 0 then
       var wstatus: I32 = 0
-      let options: I32 = 0
-      if @waitpid[I32](pid, addressof wstatus, options) < 0 then
-        -1
+      let options: I32 = 0 or _WNOHANG()
+      // poll, do not block
+      match @waitpid[I32](pid, addressof wstatus, options)
+      | let err: I32 if err < 0 =>
+        // one could possibly do at some point:
+        //let wpe = WaitPidError(@pony_os_errno())
+        WaitpidError
+      | let exited_pid: I32 if exited_pid == pid => // our process changed state
+        if _WaitPidStatus.exited(wstatus) then
+          Exited(_WaitPidStatus.exit_code(wstatus))
+        elseif _WaitPidStatus.signaled(wstatus) then
+          Signaled(_WaitPidStatus.termsig(wstatus).u32())
+        elseif _WaitPidStatus.stopped(wstatus) then
+          Signaled(_WaitPidStatus.stopsig(wstatus).u32())
+        elseif _WaitPidStatus.continued(wstatus) then
+          _StillRunning
+        else
+          // *shrug*
+          WaitpidError
+        end
+      | 0 => _StillRunning
       else
-        // Extract the process exit code.
-        (wstatus >> 8) and 0xff
+        WaitpidError
       end
     else
-      -1
+      WaitpidError
     end
+
+primitive _WaitPidStatus
+  """
+  Pure Pony implementaton of C macros for investigating
+  the status returned by `waitpid()`.
+  """
+
+  fun exited(wstatus: I32): Bool =>
+    termsig(wstatus) == 0
+
+  fun exit_code(wstatus: I32): I32 =>
+    (wstatus and 0xff00) >> 8
+
+  fun signaled(wstatus: I32): Bool =>
+    ((termsig(wstatus) + 1) >> 1).i8() > 0
+
+  fun termsig(wstatus: I32): I32 =>
+    (wstatus and 0x7f)
+
+  fun stopped(wstatus: I32): Bool =>
+    (wstatus and 0xff) == 0x7f
+
+  fun stopsig(wstatus: I32): I32 =>
+    exit_code(wstatus)
+
+  fun coredumped(wstatus: I32): Bool =>
+    (wstatus and 0x80) != 0
+
+  fun continued(wstatus: I32): Bool =>
+    wstatus == 0xffff
+
 
 class _ProcessWindows is _Process
   let hProcess: USize
+  let processError: (ProcessError | None)
 
   new create(
     path: String,
     args: Array[String] val,
     vars: Array[String] val,
+    wdir: (FilePath | None),
     stdin: _Pipe,
     stdout: _Pipe,
     stderr: _Pipe)
   =>
     ifdef windows then
+      let wdir_ptr =
+        match wdir
+        | let wdir_fp: FilePath => wdir_fp.path.cstring()
+        | None => Pointer[U8] // NULL -> use parent directory
+        end
+      var error_code: U32 = 0
+      var error_message = Pointer[U8]
       hProcess = @ponyint_win_process_create[USize](
           path.cstring(),
           _make_cmdline(args).cstring(),
           _make_environ(vars).cpointer(),
-          stdin.far_fd, stdout.far_fd, stderr.far_fd)
+          wdir_ptr,
+          stdin.far_fd, stdout.far_fd, stderr.far_fd,
+          addressof error_code, addressof error_message)
+      processError =
+        if hProcess == 0 then
+          match error_code
+          | _ERRORBADEXEFORMAT() => ProcessError(ExecveError)
+          | _ERRORDIRECTORY() =>
+            let wdirpath =
+              match wdir
+              | let wdir_fp: FilePath => wdir_fp.path
+              | None => "?"
+              end
+            ProcessError(ChdirError, "Failed to change directory to "
+              + wdirpath)
+          else
+            let message = String.from_cstring(error_message)
+            ProcessError(ForkError, recover message.clone() end)
+          end
+        end
     else
       compile_error "unsupported platform"
     end
@@ -170,7 +380,16 @@ class _ProcessWindows is _Process
   fun tag _make_cmdline(args: Array[String] val): String =>
     var cmdline: String = ""
     for arg in args.values() do
-      cmdline = cmdline + arg + " "
+      // quote args with spaces on Windows
+      var next = arg
+      ifdef windows then
+        try
+          if arg.contains(" ") and (not arg(0)? == '"') then
+            next = "\"" + arg + "\""
+          end
+        end
+      end
+      cmdline = cmdline + next + " "
     end
     cmdline
 
@@ -193,9 +412,18 @@ class _ProcessWindows is _Process
       @ponyint_win_process_kill[I32](hProcess)
     end
 
-  fun ref wait(): I32 =>
+  fun ref wait(): _WaitResult =>
     if hProcess != 0 then
-      @ponyint_win_process_wait[I32](hProcess)
+      var exit_code: I32 = 0
+      match @ponyint_win_process_wait[I32](hProcess, addressof exit_code)
+      | 0 => Exited(exit_code)
+      | 1 => _StillRunning
+      | let code: I32 =>
+        // we might want to propagate that code to the user, but should it do
+        // for other errors too
+        WaitpidError
+      end
     else
-      -1
+      WaitpidError
     end
+

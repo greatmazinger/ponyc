@@ -35,13 +35,13 @@ JsonDoc instance can be used to parse multiple JSON Strings one by one.
 ```pony
 let doc = JsonDoc
 // parsing
-doc.parse(\"\"\"{"key":"value", "property: true, "array":[1, 2.5, false]}\"\"\")?
+doc.parse("{\"key\":\"value\", \"property\": true, \"array\":[1, 2.5, false]}")?
 
 // extracting values from a JSON structure
 let json: JsonObject  = doc.data as JsonObject
 let key: String       = json.data("key")? as String
-let property: Boolean = json.data("property")? as Bool
-let array: JsonArray  = json.data("array")?
+let property: Bool    = json.data("property")? as Bool
+let array: JsonArray  = json.data("array")? as JsonArray
 let first: I64        = array.data(0)? as I64
 let second: F64       = array.data(1)? as F64
 let last: Bool        = array.data(2)? as Bool
@@ -57,7 +57,7 @@ block:
 
 ```pony
 // sending an iso doc
-let json_string = \"\"\"{"array":[1, true, null]}\"\"\"
+let json_string = "{\"array\":[1, true, null]}"
 let sendable_doc: JsonDoc iso = recover iso JsonDoc.>parse(json_string)? end
 some_actor.send(consume sendable_doc)
 

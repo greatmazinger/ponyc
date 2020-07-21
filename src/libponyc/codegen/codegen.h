@@ -9,7 +9,7 @@
 #include <llvm-c/Analysis.h>
 #include <stdio.h>
 
-#define PONY_LLVM ((LLVM_VERSION_MAJOR * 100) + LLVM_VERSION_MINOR)
+#define PONY_LLVM ((LLVM_VERSION_MAJOR * 100) + (LLVM_VERSION_MINOR * 10) + LLVM_VERSION_PATCH)
 
 #include "gendebug.h"
 #include "../reach/reach.h"
@@ -113,7 +113,7 @@ typedef struct compile_t
   const char* str_F32;
   const char* str_F64;
   const char* str_Pointer;
-  const char* str_Maybe;
+  const char* str_NullablePointer;
   const char* str_DoNotOptimise;
   const char* str_Array;
   const char* str_String;

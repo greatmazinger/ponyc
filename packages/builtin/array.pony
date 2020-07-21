@@ -4,7 +4,7 @@ class Array[A] is Seq[A]
 
   ## Usage
 
-  Creating an Array of String.
+  Creating an Array of String:
   ```pony
     let array: Array[String] = ["dog"; "cat"; "wombat"]
     // array.size() == 3
@@ -12,16 +12,16 @@ class Array[A] is Seq[A]
   ```
 
   Creating an empty Array of String, which may hold at least 10 elements before
-  requesting more space.
+  requesting more space:
   ```pony
-    let array = Array(10)
+    let array = Array[String](10)
     // array.size() == 0
     // array.space() >= 10
   ```
 
   Accessing elements can be done via the `apply(i: USize): this->A ?` method.
   The provided index might be out of bounds so `apply` is partial and has to be
-  called within a try-catch block or inside another partial method.
+  called within a try-catch block or inside another partial method:
   ```pony
     let array: Array[String] = ["dog"; "cat"; "wombat"]
     let is_second_element_wobat = try
@@ -33,8 +33,8 @@ class Array[A] is Seq[A]
   ```
 
   Adding and removing elements to and from the end of the Array can be done via
-  `push` and `pop` methods. You could treat the array as a FIFO queue using
-  those methods.
+  `push` and `pop` methods. You could treat the array as a LIFO stack using
+  those methods:
   ```pony
     while (array.size() > 0) do
       let elem = array.pop()?
@@ -46,7 +46,7 @@ class Array[A] is Seq[A]
   which alter the Array at an arbitrary index, moving elements left (when
   deleting) or right (when inserting) as necessary.
 
-  Iterating over the elements of an Array can be done using the `values` method.
+  Iterating over the elements of an Array can be done using the `values` method:
   ```pony
     for element in array.values() do
         // do something with element
@@ -338,7 +338,19 @@ class Array[A] is Seq[A]
     """
     Insert an element into the array. Elements after this are moved up by one
     index, extending the array.
-    An out of bounds index raises an error.
+
+    When inserting right beyond the last element, at index `this.size()`,
+    the element will be appended, similar to `push()`,
+    an insert at index `0` prepends the value to the array.
+    An insert into an index beyond `this.size()` raises an error.
+
+    ```pony
+    let array = Array[U8](4)              // []
+    array.insert(0, 0xDE)?                // prepend: [0xDE]
+    array.insert(array.size(), 0xBE)?     // append:  [0xDE; 0xBE]
+    array.insert(1, 0xAD)?                // insert:  [0xDE; 0xAD; 0xBE]
+    array.insert(array.size() + 1, 0xEF)? // error
+    ```
     """
     if i <= _size then
       reserve(_size + 1)
@@ -425,19 +437,19 @@ class Array[A] is Seq[A]
     """
     Chops the array in half at the split point requested and returns both
     the left and right portions. The original array is trimmed in place and
-    returned as the right portion. If the split point is larger than the
+    returned as the left portion. If the split point is larger than the
     array, the left portion is the original array and the right portion
     is a new empty array.
     Both arrays are isolated and mutable, as they do not share memory.
     The operation does not allocate a new array pointer nor copy elements.
     """
-    let start_ptr = _ptr
-    let size' = _size.min(split_point)
-    let alloc = if size' == _size then _alloc else split_point end
+    let start_ptr = cpointer(split_point)
+    let size' = _size - _size.min(split_point)
+    let alloc = _alloc - _size.min(split_point)
 
-    trim_in_place(split_point)
+    trim_in_place(0, split_point)
 
-    let left = recover
+    let right = recover
       if size' > 0 then
         from_cpointer(start_ptr._unsafe(), size', alloc)
       else
@@ -445,7 +457,52 @@ class Array[A] is Seq[A]
       end
     end
 
-    (consume left, consume this)
+    (consume this, consume right)
+
+
+  fun iso unchop(b: Array[A] iso):
+    ((Array[A] iso^, Array[A] iso^) | Array[A] iso^)
+  =>
+    """
+    Unchops two iso arrays to return the original array they were chopped from.
+    Both input arrays are isolated and mutable and were originally chopped from
+    a single array. This function checks that they are indeed two arrays chopped
+    from the same original array and can be unchopped before doing the
+    unchopping and returning the unchopped array. If the two arrays cannot be
+    unchopped it returns both arrays without modifying them.
+    The operation does not allocate a new array pointer nor copy elements.
+    """
+    if _size == 0 then
+      return consume b
+    end
+
+    if b.size() == 0 then
+      return consume this
+    end
+
+    (let unchoppable, let a_left) =
+      if (_size == _alloc) and (cpointer(_size) == b.cpointer()) then
+        (true, true)
+      elseif (b.size() == b.space()) and (b.cpointer(b.size()) == cpointer())
+        then
+        (true, false)
+      else
+        (false, false)
+      end
+
+    if not unchoppable then
+      return (consume this, consume b)
+    end
+
+    if a_left then
+      _alloc = _alloc + b._alloc
+      _size = _size + b._size
+      consume this
+    else
+      b._alloc = b._alloc + _alloc
+      b._size = b._size + _size
+      consume b
+    end
 
   fun ref copy_from[B: (A & Real[B] val & U8) = A](
     src: Array[U8] box,

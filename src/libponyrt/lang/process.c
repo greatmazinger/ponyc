@@ -1,10 +1,20 @@
-#include <platform.h>
 #include <stdio.h>
 #include "process.h"
 
+PONY_EXTERN_C_BEGIN
+
+#ifdef PLATFORM_IS_POSIX_BASED
+
+#include <sys/wait.h>
+
+PONY_API int32_t ponyint_wnohang() {
+  return WNOHANG;
+}
+#endif
+
 #ifdef PLATFORM_IS_WINDOWS
 
-PONY_EXTERN_C_BEGIN
+
 
 /**
  * Create an anonymous pipe for communicating with another (most likely child)
@@ -57,7 +67,12 @@ PONY_API size_t ponyint_win_process_create(
     char* appname,
     char* cmdline,
     char* environ,
-    uint32_t stdin_fd, uint32_t stdout_fd, uint32_t stderr_fd)
+    char* wdir,
+    uint32_t stdin_fd,
+    uint32_t stdout_fd,
+    uint32_t stderr_fd,
+    uint32_t* error_code,
+    char** error_message)
 {
     STARTUPINFO si;
     ZeroMemory(&si, sizeof(si));
@@ -78,15 +93,21 @@ PONY_API size_t ponyint_win_process_create(
         TRUE,        // handles are inherited
         0,           // creation flags
         environ,     // environment to use
-        NULL,        // use parent's current directory
+        wdir,        // current directory of the process
         &si,         // STARTUPINFO pointer
         &pi);        // receives PROCESS_INFORMATION
 
     if (success) {
         // Close the thread handle now as we don't need access to it
         CloseHandle(pi.hThread);
+        *error_code = 0;
         return (size_t) pi.hProcess;
     } else {
+        *error_code = GetLastError();
+        FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER
+            | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+            NULL, *error_code, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+            (LPSTR)error_message, 0, NULL);
         return 0;  // Null handle return on non-success.
     }
 }
@@ -96,21 +117,37 @@ PONY_API size_t ponyint_win_process_create(
  * This does block if the process is still running.
  *
  * // https://stackoverflow.com/questions/5487249/how-write-posix-waitpid-analog-for-windows
+ *
+ * possible return values:
+ * 0: all ok, extract the exitcode from exit_code_ptr
+ * 1: process didnt finish yet
+ * anything else: error waiting or getting the process exit code.
  */
-PONY_API int32_t ponyint_win_process_wait(size_t hProcess)
+PONY_API int32_t ponyint_win_process_wait(size_t hProcess, int32_t* exit_code_ptr)
 {
-    // Infinite wait here could be 0 to just poll.
-    if (WaitForSingleObject((HANDLE) hProcess, INFINITE) != 0) {
-        return -1;
+    int32_t retval = 0;
+
+    // just poll
+    switch (WaitForSingleObject((HANDLE)hProcess, 0))
+    {
+        case WAIT_OBJECT_0: // process exited
+            if (GetExitCodeProcess((HANDLE)hProcess, (DWORD*)exit_code_ptr) == 0)
+            {
+                retval = GetLastError();
+                if (retval == 0) retval = -1;
+            }
+            break;
+        case WAIT_TIMEOUT: // process is still going
+            return 1; // don't close the handle
+        case WAIT_ABANDONED: // shouldn't happen to a process
+        case WAIT_FAILED:
+            retval = GetLastError();
+            if (retval == 0) retval = -1;
+            break;
     }
 
-    DWORD exit_code = -1;
-    if (!GetExitCodeProcess((HANDLE) hProcess, &exit_code)) { // != 0 is good
-        exit_code = GetLastError();
-    }
-    CloseHandle((HANDLE) hProcess);
-
-    return exit_code;
+    CloseHandle((HANDLE)hProcess);
+    return retval;
 }
 
 /**
@@ -125,7 +162,6 @@ PONY_API int32_t ponyint_win_process_kill(size_t hProcess)
         return GetLastError();
     }
 }
+#endif // PLATFORM_IS_WINDOWS
 
 PONY_EXTERN_C_END
-
-#endif // PLATFORM_IS_WINDOWS
